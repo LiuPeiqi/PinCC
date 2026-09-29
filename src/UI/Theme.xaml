@@ -120,6 +120,11 @@
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                     </Border>
                     <ControlTemplate.Triggers>
+                        <!-- "ready": the ○ of a checklist whose tasks are all checked — full strength, always shown. -->
+                        <Trigger Property="Tag" Value="ready">
+                            <Setter TargetName="Bd" Property="Opacity" Value="1"/>
+                            <Setter TargetName="Bd" Property="Background" Value="#10000000"/>
+                        </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="Bd" Property="Background" Value="#14000000"/>
                             <Setter TargetName="Bd" Property="Opacity" Value="0.95"/>

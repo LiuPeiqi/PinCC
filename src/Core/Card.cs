@@ -183,6 +183,15 @@ public sealed partial class Card
         }
     }
 
+    /// <summary>The first open task of the note, markdown stripped (what a folded checklist shows), or null when none is open.</summary>
+    [JsonIgnore]
+    public string? NextTask => Progress.Total == Progress.Done ? null
+        : Markdown.Parse(Note).Where(b => b.Kind == BlockKind.Task && !b.Checked).Select(b => Markdown.Plain(b.Text)).FirstOrDefault(t => t.Length > 0);
+
+    /// <summary>The title is one of the tasks (a checklist without a heading): a pill then shows the next task instead.</summary>
+    [JsonIgnore]
+    public bool TitleIsTask => Progress.Total > 0 && Title is var t && Markdown.Parse(Note).Any(b => b.Kind == BlockKind.Task && Markdown.Plain(b.Text) == t);
+
     /// <summary>First #tag in the body (color-by-tag), or null.</summary>
     [JsonIgnore] public string? Tag => TagRx().Match(Body) is { Success: true } m ? m.Groups[1].Value.ToLowerInvariant() : null;
 

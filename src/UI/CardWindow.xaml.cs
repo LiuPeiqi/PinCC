@@ -35,12 +35,19 @@ public partial class CardWindow : Window
     bool _armed, _dragged, _hover, _hoverShown, _overflow, _keepEditing, _inSizeMove;
     DateTime _peekUntil;
     Px _sizeMoveStart;
+    Border? _adderHost;
+    TextBox? _adder;
+    Group? _addSession;
+    TextBlock? _addChip; // the progress chip: a "+" joins it on hover
+    bool _showDone; // folded checked tasks shown for now (this window only, never stored)
     double _sizeMoveScale = 1;
 
     public Card Card { get; private set; }
     /// <summary>The desk's registry key: the card id, or a negative number while a new card has no row yet.</summary>
     public long Ref { get; set; }
     public bool Editing { get; private set; }
+    /// <summary>Quick add is open: the action row is a one-line input for new checklist items.</summary>
+    public bool Adding => _adder != null;
     public bool Hovered => _hover;
     public bool InSizeMove => _inSizeMove;
     /// <summary>Transient status ("摘要中…") and last error; never stored.</summary>
@@ -93,6 +100,7 @@ public partial class CardWindow : Window
         Deactivated += (_, _) =>
         {
             RenderFrame();
+            EndAdd();
             if (_keepEditing) { _keepEditing = false; return; } // focus went to our own flyout
             if (Editing) EndEdit(returnFocus: false);
         };
@@ -280,17 +288,25 @@ public partial class CardWindow : Window
             var row = new DockPanel();
             var right = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             foreach (var chip in StateChips(compact: true)) right.Children.Add(chip);
-            var done = Action(CompleteGlyph, "完成", () => _desk.Complete(this));
-            done.Visibility = _hoverShown ? Visibility.Visible : Visibility.Collapsed;
-            done.Tag = "hover";
+            var done = CompleteButton();
+            if (done.Tag is not "ready") done.Tag = "hover";
+            done.Visibility = _hoverShown || done.Tag is "ready" ? Visibility.Visible : Visibility.Collapsed;
             right.Children.Add(done);
             DockPanel.SetDock(right, Dock.Right);
             row.Children.Add(right);
-            row.Children.Add(new TextBlock
+            // A checklist shows what is next: after its heading, or instead of a title that is itself one of the tasks.
+            var title = new TextBlock
             {
-                Text = c.Title.Length > 0 ? c.Title : "（空）", FontSize = _desk.FontSize, FontWeight = FontWeights.SemiBold,
-                TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center,
-            });
+                FontSize = _desk.FontSize, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center,
+            };
+            var next = c.NextTask;
+            if (next != null && c.TitleIsTask) title.Text = next;
+            else
+            {
+                title.Inlines.Add(new Run(c.Title.Length > 0 ? c.Title : "（空）"));
+                if (next != null) title.Inlines.Add(new Run(" · " + next) { FontWeight = FontWeights.Normal, Foreground = Palette.Brush(Palette.Get(_desk.ColorOf(c)).Ink, 0.6) });
+            }
+            row.Children.Add(title);
             Stack.Children.Add(row);
             return;
         }
@@ -329,7 +345,9 @@ public partial class CardWindow : Window
         {
             var body = new StackPanel();
             // Bounded: a huge paste is stored untouched but only its beginning is laid out.
-            MarkdownView.Render(body, note.Length > 12_000 ? note[..12_000] : note, cx, c.NoteLine);
+            // Checked tasks fold away once there are a few of them (display only; the fold line opens them again).
+            var noteCx = cx with { ShowDone = _showDone, ToggleDone = () => { _showDone = !_showDone; Render(); Dispatcher.BeginInvoke(() => _desk.Relayout(force: true), DispatcherPriority.Loaded); } };
+            MarkdownView.Render(body, note.Length > 12_000 ? note[..12_000] : note, noteCx, c.NoteLine);
             Stack.Children.Add(Spaced(body));
         }
         else if (Stack.Children.Count == 0)
@@ -485,7 +503,16 @@ public partial class CardWindow : Window
             list.Add(chip);
         }
         if (c.Progress is { Total: > 0 } p)
-            list.Add(Chip("\uE73A", $"{p.Done}/{p.Total}", "任务进度", null, p.Done == p.Total ? Palette.Brush(sw.Accent) : null));
+        {
+            if (compact || Ref < 0) list.Add(Chip("\uE73A", $"{p.Done}/{p.Total}", "任务进度", null, p.Done == p.Total ? Palette.Brush(sw.Accent) : null));
+            else
+            {
+                // The progress chip sits right under the list: it is also where a new item is added (a "+" shows on hover).
+                var chip = Chip("\uE73A", $"{p.Done}/{p.Total}", "任务进度 · 点此添加一项", StartAdd, p.Done == p.Total ? Palette.Brush(sw.Accent) : null);
+                _addChip = (TextBlock)chip.Content;
+                list.Add(chip);
+            }
+        }
         if (!compact && _desk.Llm != null && Busy == null)
         {
             bool none = string.IsNullOrWhiteSpace(c.Summary);
@@ -499,10 +526,17 @@ public partial class CardWindow : Window
     {
         Chips.Children.Clear();
         Actions.Children.Clear();
+        _addChip = null;
         bool show = !Editing && !Pill && Strip == null;
         Row.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         if (!show) return;
         var c = Card;
+        Chips.Visibility = Actions.Visibility = Adding ? Visibility.Collapsed : Visibility.Visible;
+        if (Adding)
+        {
+            if (_adderHost!.Parent == null) Row.Children.Add(_adderHost);
+            return;
+        }
         if (c.ImageOnly)
         {
             // Pictures stay full-bleed: the row floats over the image bottom on a scrim, on hover only.
@@ -539,16 +573,41 @@ public partial class CardWindow : Window
                 Actions.Children.Add(Action("\uE70E", "折叠", () => _desk.ToggleCollapse(this)));
             }
             else Actions.Children.Add(Action("\uE712", "更多", OpenMenu));
-            Actions.Children.Add(Action(CompleteGlyph, "完成", () => _desk.Complete(this)));
+            Actions.Children.Add(CompleteButton());
         }
-        ShowActions();
+        ShowActions(animate: false);
     }
 
-    void ShowActions()
+    /// <summary>○ completes the card. When every task is checked it is highlighted and stays visible without hover.</summary>
+    Button CompleteButton()
+    {
+        var b = Action(CompleteGlyph, "完成", () => _desk.Complete(this));
+        if (Card.Progress is { Total: > 0 } p && p.Done == p.Total && !Card.Overdue)
+        {
+            b.Tag = "ready";
+            b.Foreground = Palette.Brush(Palette.Get(_desk.ColorOf(Card)).Accent);
+            b.ToolTip = "清单已全部勾完 · 点此完成这张卡片";
+        }
+        return b;
+    }
+
+    /// <summary>Hover actions fade in and out; a highlighted ○ ("ready") stays. Rebuilt rows take their state at once.</summary>
+    void ShowActions(bool animate = true)
     {
         bool show = _hoverShown || Card.Overdue;
-        Actions.BeginAnimation(OpacityProperty, new DoubleAnimation(show ? 1 : 0, TimeSpan.FromMilliseconds(show ? 120 : 200)));
-        Actions.IsHitTestVisible = show;
+        foreach (var a in Actions.Children.OfType<FrameworkElement>())
+        {
+            bool on = show || a.Tag is "ready";
+            if (animate) a.BeginAnimation(OpacityProperty, new DoubleAnimation(on ? 1 : 0, TimeSpan.FromMilliseconds(on ? 120 : 200)));
+            else { a.BeginAnimation(OpacityProperty, null); a.Opacity = on ? 1 : 0; }
+            a.IsHitTestVisible = on;
+        }
+        // Added and removed, not emptied: an empty icon-font run still draws missing-glyph boxes.
+        if (_addChip is { } tb && (tb.Inlines.LastInline is Run { Tag: "add" }) != _hoverShown)
+        {
+            if (_hoverShown) tb.Inlines.Add(new Run(" \uE710") { Tag = "add", FontFamily = MarkdownView.Icons, FontSize = _desk.FontSize - 4, BaselineAlignment = BaselineAlignment.Center });
+            else tb.Inlines.Remove(tb.Inlines.LastInline);
+        }
         if (Card.ImageOnly && Strip == null && !Pill && !Editing) Row.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         foreach (var e in Stack.Children.OfType<DockPanel>().SelectMany(d => d.Children.OfType<StackPanel>()).SelectMany(p => p.Children.OfType<FrameworkElement>()))
             if (e.Tag is "hover") e.Visibility = _hoverShown ? Visibility.Visible : Visibility.Collapsed;
@@ -675,6 +734,7 @@ public partial class CardWindow : Window
     public void BeginEdit(int? line = null, int? column = null)
     {
         if (Editing || Strip != null) return;
+        EndAdd();
         if (Card.Collapsed) _desk.ToggleCollapse(this);
         LayoutPill = false;
         Editing = true;
@@ -749,6 +809,9 @@ public partial class CardWindow : Window
         var mods = Keyboard.Modifiers;
         if (e.Key == Key.Escape) { e.Handled = true; EndEdit(returnFocus: true); return; }
         if (e.Key == Key.Enter && mods == ModifierKeys.None && ContinueList()) { e.Handled = true; return; }
+        // WPF's TextBox pastes text only: with just a picture (a screenshot) or copied files, Ctrl+V would do nothing.
+        if ((e.Key == Key.V && mods == ModifierKeys.Control || e.Key == Key.Insert && mods == ModifierKeys.Shift)
+            && ClipData.Current() is { } clip && ClipData.Text(clip) == null && PasteData(clip)) { e.Handled = true; return; }
         if (e.Key == Key.Tab && mods is ModifierKeys.None or ModifierKeys.Shift) { e.Handled = true; Indent(mods == ModifierKeys.Shift); return; }
         if (mods == ModifierKeys.Control)
         {
@@ -857,12 +920,99 @@ public partial class CardWindow : Window
     /// <summary>Images and files pasted while editing: images join the card's pictures, files become path lines.</summary>
     void OnPaste(object sender, DataObjectPastingEventArgs e)
     {
-        var lines = _desk.IngestImages(this, e.DataObject, textPreferred: true);
-        if (lines == null) return; // plain text: let the TextBox paste it
-        e.CancelCommand();
+        if (PasteData(e.DataObject)) e.CancelCommand(); // otherwise plain text: the TextBox pastes it
+    }
+
+    /// <summary>Takes pictures and files from <paramref name="data"/>; false when it is plain text for the TextBox.</summary>
+    bool PasteData(IDataObject data)
+    {
+        var lines = _desk.IngestImages(this, data, textPreferred: true);
+        if (lines == null) return false;
         if (lines.Length > 0) Insert(lines);
         else if (Ref < 0 && Editor.Text.Trim().Length == 0) Dispatcher.BeginInvoke(() => EndEdit(returnFocus: false)); // a new card that is just a picture floats at its size
         else ShowBadge("已添加图片");
+        return true;
+    }
+
+    // ================= quick add (checklists) =================
+
+    /// <summary>
+    /// Adds checklist items without edit mode: the action row becomes a one-line input. Enter adds "- [ ] …" after the last
+    /// task and stays open for the next one; Esc, Enter on an empty line, or leaving the card closes it (typed text is
+    /// kept, as leaving edit mode keeps it). The whole session is one undo step.
+    /// </summary>
+    public void StartAdd()
+    {
+        if (Adding || Editing || Strip != null || Ref < 0) return;
+        if (Card.Collapsed) _desk.ToggleCollapse(this);
+        LayoutPill = false;
+        var sw = Palette.Get(_desk.ColorOf(Card));
+        var box = new TextBox
+        {
+            Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(0), FontSize = _desk.FontSize,
+            Foreground = Foreground, CaretBrush = Foreground, SelectionBrush = Palette.Brush(sw.Accent), VerticalAlignment = VerticalAlignment.Center,
+            AcceptsReturn = false, TextWrapping = TextWrapping.NoWrap, SpellCheck = { IsEnabled = false },
+        };
+        box.SetResourceReference(FontFamilyProperty, "Ui.Font");
+        var hint = new TextBlock
+        {
+            Text = "添加一项 · Enter 确认，Esc 结束", FontSize = _desk.FontSize - 1, Foreground = Palette.Brush(sw.Ink, 0.45),
+            VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false, TextTrimming = TextTrimming.CharacterEllipsis,
+        };
+        box.TextChanged += (_, _) => hint.Visibility = box.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        box.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Escape) { e.Handled = true; EndAdd(); }
+            else if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.None)
+            {
+                e.Handled = true;
+                if (box.Text.Trim().Length == 0) { EndAdd(); return; }
+                var text = box.Text;
+                box.Text = "";
+                _desk.AddTasks(this, text, _addSession!);
+            }
+        };
+        // A pasted list becomes one item per line (a one-line TextBox would keep only its first line).
+        DataObject.AddPastingHandler(box, (_, e) =>
+        {
+            if (!e.SourceDataObject.GetDataPresent(DataFormats.UnicodeText) || e.SourceDataObject.GetData(DataFormats.UnicodeText) is not string t || !t.Contains('\n')) return;
+            e.CancelCommand();
+            _desk.AddTasks(this, box.Text + t, _addSession!);
+            box.Text = "";
+        });
+        var input = new Grid();
+        input.Children.Add(hint);
+        input.Children.Add(box);
+        var line = new DockPanel();
+        var mark = new Border
+        {
+            Width = 14, Height = 14, CornerRadius = new CornerRadius(3), BorderThickness = new Thickness(1.25), BorderBrush = Palette.Brush(sw.Ink, 0.45),
+            Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center,
+        };
+        DockPanel.SetDock(mark, Dock.Left);
+        line.Children.Add(mark);
+        line.Children.Add(input);
+        _adderHost = new Border { Child = line, CornerRadius = new CornerRadius(6), Background = Palette.Brush(sw.Ink, 0.06), Padding = new Thickness(7, 0, 7, 0), Margin = new Thickness(2, 1, 2, 1) };
+        _adder = box;
+        _addSession = _desk.Store.Begin();
+        Render();
+        Activate();
+        Dispatcher.BeginInvoke(() => _adder?.Focus(), DispatcherPriority.Input);
+    }
+
+    /// <summary>Closes quick add, keeping what was typed. Safe to call when it is not open.</summary>
+    public void EndAdd()
+    {
+        if (_adder is not { } box) return;
+        var text = box.Text;
+        var g = _addSession!;
+        Row.Children.Remove(_adderHost);
+        _adder = null;
+        _adderHost = null;
+        _addSession = null;
+        if (text.Trim().Length > 0) _desk.AddTasks(this, text, g); // re-renders the row
+        else RenderRow();
+        _desk.Relayout(); // no longer held in place: back into the tiling
     }
 
     // ================= mouse & keyboard =================
@@ -885,6 +1035,7 @@ public partial class CardWindow : Window
         }
         if (IsInteractive(e.OriginalSource)) return;
         if (Editing && IsWithin(e.OriginalSource, Editor)) return;
+        if (_adderHost != null && IsWithin(e.OriginalSource, _adderHost)) return;
         if (Card.ImageOnly && Keyboard.Modifiers == ModifierKeys.Control)
         {
             e.Handled = true;
@@ -971,7 +1122,7 @@ public partial class CardWindow : Window
         var mods = Keyboard.Modifiers;
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
         if (Strip is { } strip && key == Key.Z && mods == ModifierKeys.Control) { e.Handled = true; strip.Undo(); return; }
-        if (Editing || Strip != null) return;
+        if (Editing || Adding || Strip != null) return;
         bool handled = true;
         switch (key)
         {

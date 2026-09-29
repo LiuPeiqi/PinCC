@@ -353,6 +353,22 @@ public sealed class Desk
     public CardWindow NewImageCard(Screen s, string img, Group? group = null) =>
         NewCard(s, "", edit: false, images: [img], size: NaturalSize(s, img), group: group);
 
+    /// <summary>
+    /// Click on +: a picture copied since PinCC last used the clipboard (a screenshot, "copy image", image files) becomes a
+    /// 1:1 picture card at once; otherwise a new empty card to type in. The same copy is pinned once, so the next click on
+    /// + opens an empty card again.
+    /// </summary>
+    public void NewFromHub(Screen s, IntPtr returnFocus)
+    {
+        if (ClipData.Fresh && ClipData.Current() is { } data && ClipData.Pictures(data, Store) is { Count: > 0 } imgs)
+        {
+            var g = Store.Begin();
+            foreach (var img in imgs) NewImageCard(s, img, g).ShowBadge("剪贴板图片 · 再点 + 新建空白卡片");
+            return;
+        }
+        NewCard(s, returnFocus: returnFocus);
+    }
+
     /// <summary>Clipboard or a drop on the hub (one undo step): one card per file, a link, text (with its browser source), or a picture.</summary>
     public void CreateFrom(IDataObject? data, Screen s)
     {
@@ -466,6 +482,9 @@ public sealed class Desk
 
     public void ToggleTask(CardWindow w, int line) => Change(w, c => c.Body = Markdown.ToggleTask(c.Body, line), "edit");
 
+    /// <summary>Quick add on a checklist: open items after the last task. One add session (<paramref name="g"/>) is one undo step.</summary>
+    public void AddTasks(CardWindow w, string text, Group g) => Change(w, c => c.Body = Markdown.AddTasks(c.Body, text), "edit", g);
+
     // ================= card actions =================
 
     public void Complete(CardWindow w) => Finish(w, done: true);
@@ -477,6 +496,7 @@ public sealed class Desk
     /// </summary>
     void Finish(CardWindow w, bool done)
     {
+        w.EndAdd();
         if (w.Editing) w.EndEdit(returnFocus: false);
         if (!_cards.ContainsValue(w)) return;
         if (w.Ref < 0) { Close(w); Relayout(force: true); return; }
@@ -520,6 +540,7 @@ public sealed class Desk
 
     public void ToggleCollapse(CardWindow w)
     {
+        w.EndAdd();
         if (w.Editing) w.EndEdit(returnFocus: false);
         if (!_cards.ContainsValue(w)) return;
         w.LayoutPill = false;
@@ -733,6 +754,7 @@ public sealed class Desk
         {
             if (w.Card.ImageOnly && LoadImage(w.Card.Images[0], 0) is { } b) Clipboard.SetImage(b);
             else Clipboard.SetText(string.Join("\n\n", new[] { w.Card.Body, w.Card.Summary }.Where(x => !string.IsNullOrWhiteSpace(x))));
+            ClipData.MarkUsed(); // our own copy is not a new picture for +
             w.ShowBadge("已复制");
         }
         catch (System.Runtime.InteropServices.COMException) { w.ShowBadge("剪贴板被占用，请重试"); }
@@ -751,7 +773,7 @@ public sealed class Desk
         else if (_deferred) Relayout();
     }
 
-    public void Resized(CardWindow w) => Relayout(force: w.Editing || w == _peek);
+    public void Resized(CardWindow w) => Relayout(force: w.Editing || w.Adding || w == _peek);
 
     /// <summary>Opens a source or link: pages and documents with their default apps; programs are only shown in Explorer.</summary>
     public void Open(string target)
@@ -803,7 +825,7 @@ public sealed class Desk
         var moves = new List<(CardWindow W, Px R, Screen S)>();
         _deferred = false;
         var all = _cards.Values.ToList();
-        bool Busy(CardWindow w) => w.Editing || w.Strip != null || w == _peek || w.InSizeMove;
+        bool Busy(CardWindow w) => w.Editing || w.Adding || w.Strip != null || w == _peek || w.InSizeMove;
 
         // 1. free cards
         foreach (var w in all.Where(w => !Busy(w) && w.Card.Free))
@@ -1299,6 +1321,7 @@ public sealed class Desk
         if (c.Src != null) Add(m, "", c.IsLink ? "复制链接" : "复制路径", () => { try { Clipboard.SetText(c.Src!); w.ShowBadge("已复制"); } catch { } });
         if (c.IsFile) Add(m, "", "打开所在位置", () => Reveal(c.Src!));
         if (c.ImageOnly) Add(m, "", "添加文字", () => w.BeginEdit());
+        if (c.Progress.Total > 0) Add(m, "", "添加一项", () => w.StartAdd());
         Add(m, "", "颜色…", () => Flyout.Colors(this, w, w));
         Add(m, c.Collapsed ? "" : "", c.Collapsed ? "展开" : "折叠", () => ToggleCollapse(w));
         if (c.Topmost) m.Items.Add(OpacityRow(w, m));
@@ -1466,9 +1489,9 @@ public sealed class Desk
     {
         Directory.CreateDirectory(dir);
         var errors = new List<string>();
-        void Try(string name, Func<FrameworkElement> build, double width)
+        void Try(string name, Func<FrameworkElement> build, double width, double height = 720)
         {
-            try { Render(build(), Path.Combine(dir, $"ui-{name}.png"), width); }
+            try { Render(build(), Path.Combine(dir, $"ui-{name}.png"), width, height); }
             catch (Exception e) { errors.Add($"{name}: {e}"); }
         }
         ManageWindow? m = null;
@@ -1495,7 +1518,38 @@ public sealed class Desk
         Try("card-menu", () => CardMenu(card), double.NaN);
         sample?.Close();
         Try("hub-menu", () => HubMenu(Screens.Primary), double.NaN);
+        // Checklist states on sample cards (never shown): folded checked items, the highlighted ○, quick add, a pill with the next task.
+        const string list = "## 周末\n- [x] 洗车\n- [x] 取快递\n- [ ] 买菜\n- [x] 理发\n  - 顺便买洗发水\n- [ ] 给妈妈打电话";
+        SampleCard("checklist-folded", list);
+        SampleCard("checklist-unfolded", list, unfold: true);
+        SampleCard("checklist-all-done", "## 周末\n- [x] 洗车\n- [x] 买菜");
+        SampleCard("checklist-adding", "## 周末\n- [ ] 洗车", w => w.StartAdd());
+        SampleCard("checklist-pill", list, w => { w.Card.Collapsed = true; w.Render(); });
+        SampleCard("checklist-pill-bare", "- [x] 洗车\n- [ ] 买菜", w => { w.Card.Collapsed = true; w.Render(); });
         File.WriteAllText(Path.Combine(dir, "ui-errors.txt"), string.Join("\n\n", errors));
+
+        void SampleCard(string name, string body, Action<CardWindow>? setup = null, bool unfold = false)
+        {
+            var w = new CardWindow(this, new Card { Body = body, W = 260 });
+            try
+            {
+                setup?.Invoke(w);
+                if (unfold && FindFold(w.Content as DependencyObject) is { } fold)
+                    fold.RaiseEvent(new System.Windows.Input.MouseButtonEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 0, System.Windows.Input.MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent });
+                var e = (FrameworkElement)w.Content;
+                e.Measure(new Size(260, double.PositiveInfinity));
+                Try("card-" + name, () => e, 260, w.Pill ? CardWindow.PillH : Math.Ceiling(e.DesiredSize.Height));
+            }
+            catch (Exception ex) { errors.Add($"card-{name}: {ex}"); }
+            finally { w.Close(); }
+        }
+        static TextBlock? FindFold(DependencyObject? d)
+        {
+            if (d is TextBlock { ToolTip: "显示已勾选的任务" } t) return t;
+            foreach (var child in LogicalTreeHelper.GetChildren(d ?? new DependencyObject()).OfType<DependencyObject>())
+                if (FindFold(child) is { } found) return found;
+            return null;
+        }
 
         static FrameworkElement Surface(UIElement content)
         {
@@ -1503,10 +1557,10 @@ public sealed class Desk
             b.SetResourceReference(FrameworkElement.StyleProperty, "Ui.Surface");
             return b;
         }
-        static void Render(FrameworkElement e, string path, double width)
+        static void Render(FrameworkElement e, string path, double width, double height)
         {
-            e.Measure(new Size(double.IsNaN(width) ? double.PositiveInfinity : width, double.IsNaN(width) ? double.PositiveInfinity : 720));
-            e.Arrange(new Rect(new Point(), double.IsNaN(width) ? e.DesiredSize : new Size(width, 720)));
+            e.Measure(new Size(double.IsNaN(width) ? double.PositiveInfinity : width, double.IsNaN(width) ? double.PositiveInfinity : height));
+            e.Arrange(new Rect(new Point(), double.IsNaN(width) ? e.DesiredSize : new Size(width, height)));
             e.UpdateLayout();
             var bmp = new RenderTargetBitmap(Math.Max(1, (int)Math.Ceiling(e.ActualWidth)), Math.Max(1, (int)Math.Ceiling(e.ActualHeight)), 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
             bmp.Render(e);

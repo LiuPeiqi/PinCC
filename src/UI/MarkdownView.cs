@@ -8,7 +8,7 @@ using PinCC.Core;
 namespace PinCC.UI;
 
 /// <summary>What a rendered card needs from its owner: colors, image loading and callbacks.</summary>
-public sealed class MdContext
+public sealed record MdContext
 {
     public required Brush Ink { get; init; }
     public required Brush Muted { get; init; }
@@ -18,6 +18,10 @@ public sealed class MdContext
     public Func<string, ImageSource?> Image { get; init; } = _ => null;
     public Action<int>? ToggleTask { get; init; }
     public Action<string>? Open { get; init; }
+    /// <summary>Checklist folding (null: never fold): checked tasks fold behind one line once there are a few of them.</summary>
+    public Action? ToggleDone { get; init; }
+    /// <summary>With <see cref="ToggleDone"/>: the folded tasks are shown for now.</summary>
+    public bool ShowDone { get; init; }
 }
 
 /// <summary>Renders the Core.Markdown blocks into lightweight WPF elements (TextBlocks, no scrolling containers).</summary>
@@ -32,15 +36,30 @@ public static class MarkdownView
     {
         host.Children.Clear();
         MdBlock? prev = null;
-        foreach (var raw in Markdown.Parse(md))
+        var blocks = Markdown.Parse(md);
+        var fold = cx.ToggleDone != null ? Markdown.FoldDone(blocks) : null;
+        for (int i = 0; i < blocks.Count; i++)
         {
-            var b = raw with { Line = raw.Line + lineOffset };
+            if (fold != null && !cx.ShowDone && fold.Contains(i)) continue;
+            var b = blocks[i] with { Line = blocks[i].Line + lineOffset };
             var e = Element(b, cx);
             e.Tag = b.Line; // lets double-click put the caret on this source line
             e.Margin = new Thickness(Indent(b), prev == null ? 0 : Gap(prev, b), 0, 0);
             host.Children.Add(e);
             prev = b;
         }
+        if (fold != null) host.Children.Add(FoldLine(fold.Count(i => blocks[i] is { Kind: BlockKind.Task, Checked: true }), cx));
+    }
+
+    /// <summary>"▸ 已完成 N 项" under a checklist whose checked items are folded (click: show them / fold them again).</summary>
+    static FrameworkElement FoldLine(int done, MdContext cx)
+    {
+        var t = new TextBlock { FontSize = cx.Size - 1.5, Foreground = cx.Muted, Cursor = Cursors.Hand, Margin = new Thickness(0, 6, 0, 0), Background = Brushes.Transparent };
+        t.Inlines.Add(new Run(cx.ShowDone ? "\uE70D" : "\uE76C") { FontFamily = Icons, FontSize = cx.Size - 5, BaselineAlignment = BaselineAlignment.Center });
+        t.Inlines.Add(new Run(cx.ShowDone ? $"  收起已完成的 {done} 项" : $"  已完成 {done} 项"));
+        t.ToolTip = cx.ShowDone ? "折叠已勾选的任务" : "显示已勾选的任务";
+        t.MouseLeftButtonUp += (_, e) => { e.Handled = true; cx.ToggleDone?.Invoke(); };
+        return t;
     }
 
     static double Indent(MdBlock b) => b.Indent * 16;

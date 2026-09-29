@@ -188,6 +188,59 @@ public static partial class Markdown
         return string.Join("\n", lines);
     }
 
+    /// <summary>Checks or unchecks the task on source line <paramref name="line"/> (anything else is left alone).</summary>
+    public static string SetTask(string md, int line, bool done)
+    {
+        var lines = md.Replace("\r\n", "\n").Split('\n');
+        if (line < 0 || line >= lines.Length || TaskLineRx().Match(lines[line]) is not { Success: true } m || (m.Groups[3].Value != " ") == done) return md;
+        return ToggleTask(md, line);
+    }
+
+    /// <summary>Source lines of the tasks, in order: the same tasks the progress counts (nothing inside ``` fences).</summary>
+    public static List<int> TaskLines(string md) => Parse(md).Where(b => b.Kind == BlockKind.Task).Select(b => b.Line).ToList();
+
+    /// <summary>
+    /// Adds one open task per non-empty line of <paramref name="text"/> (a typed "- [ ] " or "- " is not doubled), after
+    /// the last task and its sub-items, at the list's outer indent and marker; at the end when there is no task yet.
+    /// </summary>
+    public static string AddTasks(string md, string text)
+    {
+        var items = text.Replace("\r\n", "\n").Split('\n').Select(l => ItemPrefixRx().Replace(l.Trim(), "").Trim()).Where(l => l.Length > 0).ToList();
+        if (items.Count == 0) return md;
+        var lines = md.Replace("\r\n", "\n").Split('\n').ToList();
+        var tasks = TaskLines(md);
+        if (tasks.Count == 0)
+        {
+            var body = md.Replace("\r\n", "\n").TrimEnd();
+            return (body.Length > 0 ? body + "\n" : "") + string.Join("\n", items.Select(i => "- [ ] " + i));
+        }
+        var outer = tasks.Select(l => TaskLineRx().Match(lines[l])).MinBy(m => m.Groups[1].Value.Length)!;
+        string indent = outer.Groups[1].Value, marker = outer.Groups[2].Value;
+        int at = tasks[^1] + 1;
+        while (at < lines.Count && lines[at].Trim().Length > 0 && lines[at].Length - lines[at].TrimStart().Length > indent.Length) at++; // its sub-items
+        lines.InsertRange(at, items.Select(i => $"{indent}{marker} [ ] {i}"));
+        return string.Join("\n", lines);
+    }
+
+    /// <summary>
+    /// Checked tasks to fold out of view, with their sub-items (indexes into <paramref name="blocks"/>): only once at least
+    /// <paramref name="min"/> are checked and one is still open. Null when nothing folds. Display only.
+    /// </summary>
+    public static HashSet<int>? FoldDone(IReadOnlyList<MdBlock> blocks, int min = 3)
+    {
+        int done = blocks.Count(b => b.Kind == BlockKind.Task && b.Checked);
+        if (done < min || !blocks.Any(b => b.Kind == BlockKind.Task && !b.Checked)) return null;
+        var hide = new HashSet<int>();
+        for (int i = 0; i < blocks.Count; i++)
+        {
+            if (blocks[i].Kind != BlockKind.Task || !blocks[i].Checked) continue;
+            int indent = blocks[i].Indent;
+            hide.Add(i);
+            while (i + 1 < blocks.Count && blocks[i + 1].Kind is (BlockKind.Bullet or BlockKind.Ordered or BlockKind.Task) && blocks[i + 1].Indent > indent) hide.Add(++i);
+        }
+        return hide;
+    }
+
     /// <summary>
     /// Enter inside a list line: returns the prefix to start the next item ("- [ ] ", "  - ", "3. "),
     /// "" when the current item is empty (the caller removes the marker to end the list), or null for non-list lines.
@@ -214,6 +267,7 @@ public static partial class Markdown
     [GeneratedRegex(@"^\s*!\[([^\]]*)\]\(([^)\s]+)\)\s*$")] private static partial Regex ImageLineRx();
     [GeneratedRegex(@"^(\s*)([-*+])\s+\[([ xX])\](?:\s+(.*))?$")] private static partial Regex TaskLineRx();
     [GeneratedRegex(@"^(\s*)([-*+])\s+(.*)$")] private static partial Regex BulletRx();
+    [GeneratedRegex(@"^(?:[-*+]\s+)?(?:\[[ xX]?\](?:\s+|$))?")] private static partial Regex ItemPrefixRx();
     [GeneratedRegex(@"^(\s*)(\d{1,3})[.)]\s+(.*)$")] private static partial Regex OrderedRx();
     [GeneratedRegex(@"^\s{0,3}>\s?(.*)$")] private static partial Regex QuoteRx();
     // The target may hold one level of balanced parentheses: [w](https://en.wikipedia.org/wiki/Foo_(bar)).

@@ -125,7 +125,7 @@ public sealed class HubWindow : Window
             button.ReleaseMouseCapture();
             if (!_pressed) return;
             _pressed = false;
-            if (!_dragging) { _desk.NewCard(Screen, returnFocus: Native.GetForegroundWindow()); return; }
+            if (!_dragging) { _desk.NewFromHub(Screen, Native.GetForegroundWindow()); return; }
             Native.GetCursorPos(out var p);
             var s = Screens.At(p.X, p.Y);
             bool left = p.X < s.Work.CX, top = p.Y < s.Work.CY;
@@ -206,7 +206,7 @@ public sealed class HubWindow : Window
         _badge.Visibility = text == null ? Visibility.Collapsed : Visibility.Visible;
         _badgeText.Text = text ?? "";
         _badge.Background = Palette.Brush(color);
-        ToolTip = $"新建卡片（{_desk.Store.Setting("hk.new", Hotkeys.Actions[0].Default)}）\n悬停：平铺 / 折叠 / 最小化 · 右键：更多\n可拖入文件、链接、图片或文字"
+        ToolTip = $"新建卡片（{_desk.Store.Setting("hk.new", Hotkeys.Actions[0].Default)}）\n刚复制了图片（截图）时，点 + 直接贴成 1:1 图片卡片\n悬停：平铺 / 折叠 / 最小化 · 右键：更多\n可拖入文件、链接、图片或文字"
             + (overflow > 0 ? $"\n空间不足：{overflow} 张卡片未显示（管理 › 卡片 可查看）" : "")
             + (_desk.HotkeyProblem ? "\n有快捷键被其他程序占用（右键查看）" : "");
         var vis = _desk.Fullscreen(Screen) ? Visibility.Hidden : Visibility.Visible;

@@ -13,9 +13,19 @@ public static partial class ClipData
 
     public static bool IsImageFile(string path) => ImageExts.Contains(Path.GetExtension(path).ToLowerInvariant());
 
-    /// <summary>Clipboard.GetDataObject with retries (another app may briefly hold the clipboard).</summary>
+    /// <summary>The clipboard's sequence number when PinCC last took from it or wrote to it (see <see cref="Fresh"/>).</summary>
+    static uint _used;
+
+    /// <summary>Something was copied since PinCC last used the clipboard: + pins a copied picture once, not on every click.</summary>
+    public static bool Fresh => Native.GetClipboardSequenceNumber() != _used;
+
+    /// <summary>Marks the current clipboard as used (PinCC just wrote it, e.g. Ctrl+C on a card).</summary>
+    public static void MarkUsed() => _used = Native.GetClipboardSequenceNumber();
+
+    /// <summary>Clipboard.GetDataObject with retries (another app may briefly hold the clipboard); marks it as used.</summary>
     public static IDataObject? Current()
     {
+        MarkUsed();
         for (int i = 0; i < 5; i++)
         {
             try { return Clipboard.GetDataObject(); }
@@ -34,6 +44,18 @@ public static partial class ClipData
             return string.Join("\n", files.Select(f => IsImageFile(f) && StoreFile(f, store) is { } img ? $"![]({img})" : $"[{Path.GetFileName(f)}]({new Uri(f).AbsoluteUri})"));
         if (preferText && data.GetDataPresent(DataFormats.UnicodeText)) return null;
         return ImagePng(data) is { } png ? $"![]({store.SaveImage(png)})" : null;
+    }
+
+    /// <summary>
+    /// A copied picture, stored: bitmap data without text (Office and browsers put text beside the bitmap when you copy
+    /// cells or a selection: that is text), or copied files that are all images. Empty when it is anything else.
+    /// </summary>
+    public static List<string> Pictures(IDataObject data, Store store)
+    {
+        if (Files(data) is { Length: > 0 } files)
+            return files.All(IsImageFile) ? files.Take(12).Select(f => StoreFile(f, store)).OfType<string>().ToList() : [];
+        if (Text(data) is { } text && text.Trim().Length > 0) return [];
+        return ImagePng(data) is { } png ? [store.SaveImage(png)] : [];
     }
 
     public static string[]? Files(IDataObject data)

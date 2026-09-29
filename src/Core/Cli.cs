@@ -13,7 +13,7 @@ public static class Cli
 {
     public const int Ok = 0, UsageError = 1, NotFound = 2, Conflict = 3, Busy = 4;
 
-    static readonly string[] EditOptions = ["summary", "remind", "done", "undone", "color", "top", "normal", "image", "json"];
+    static readonly string[] EditOptions = ["summary", "remind", "done", "undone", "color", "top", "normal", "image", "add-task", "json"];
 
     /// <summary>The options each verb accepts: anything else is a usage error, so a typo is never silently ignored.</summary>
     static readonly Dictionary<string, string[]> Options = new()
@@ -21,7 +21,7 @@ public static class Cli
         ["list"] = ["all", "json", "md"],
         ["show"] = ["json"],
         ["add"] = EditOptions,
-        ["set"] = [.. EditOptions, "append", "if-rev", "if-input"],
+        ["set"] = [.. EditOptions, "append", "check", "uncheck", "if-rev", "if-input"],
         ["rm"] = ["json"],
         ["log"] = ["json"],
         ["restore"] = ["json"],
@@ -65,7 +65,7 @@ public static class Cli
                 case "add":
                 {
                     var body = Text(pos, 0, readStdin, flags) ?? "";
-                    if (body.Length == 0 && !flags.ContainsKey("image")) throw new ArgumentException("add 需要内容：PinCC add \"文字\"、PinCC add -（标准输入）或 --image 图片");
+                    if (body.Length == 0 && !flags.ContainsKey("image") && !flags.ContainsKey("add-task")) throw new ArgumentException("add 需要内容：PinCC add \"文字\"、PinCC add -（标准输入）、--add-task 任务或 --image 图片");
                     var change = Changes(s, flags, readStdin, null);
                     var c = new Card { Body = body };
                     change(c);
@@ -138,7 +138,12 @@ public static class Cli
     /// </summary>
     static Action<Card> Changes(Store s, Dictionary<string, string> f, Func<string> readStdin, string? text)
     {
+        if (f.GetValueOrDefault("summary") == "-" && f.GetValueOrDefault("add-task") == "-") throw new ArgumentException("标准输入只能读一次：--summary 和 --add-task 不能都是 -");
         string? summary = f.TryGetValue("summary", out var sv) ? sv == "-" ? Stdin(readStdin, "摘要") : sv : null;
+        string? addTask = f.TryGetValue("add-task", out var av) ? av == "-" ? Stdin(readStdin, "任务") : av : null;
+        if (addTask != null && addTask.Trim().Length == 0) throw new ArgumentException("--add-task 需要任务文字");
+        var check = TaskNumbers(f, "check");
+        var uncheck = TaskNumbers(f, "uncheck");
         long? remind = null;
         bool setRemind = f.TryGetValue("remind", out var rv);
         if (setRemind && rv is not ("off" or "clear" or "none" or "清除"))
@@ -159,6 +164,16 @@ public static class Cli
         {
             if (text != null) c.Body = f.ContainsKey("append") && c.Body.Length > 0 ? c.Body.TrimEnd() + "\n" + text : text;
             if (image != null) c.Images.Add(image);
+            if (check.Count + uncheck.Count > 0)
+            {
+                // Numbered like the progress counts them; checked in the write transaction, against the body as stored.
+                var lines = Markdown.TaskLines(c.Body);
+                if (check.Concat(uncheck).FirstOrDefault(n => n > lines.Count) is int bad and > 0)
+                    throw new ArgumentException(lines.Count == 0 ? $"#{c.Id} 没有任务" : $"#{c.Id} 只有 {lines.Count} 个任务，没有第 {bad} 个");
+                foreach (var n in check) c.Body = Markdown.SetTask(c.Body, lines[n - 1], true);
+                foreach (var n in uncheck) c.Body = Markdown.SetTask(c.Body, lines[n - 1], false);
+            }
+            if (addTask != null) c.Body = Markdown.AddTasks(c.Body, addTask);
             if (summary != null) // after the body: the summary belongs to the text as it is now
             {
                 c.Summary = summary.Length == 0 ? null : summary;
@@ -173,6 +188,16 @@ public static class Cli
             if (f.ContainsKey("top")) c.Topmost = true;
             if (f.ContainsKey("normal")) c.Topmost = false;
         };
+    }
+
+    /// <summary>"--check 2" / "--check 1,3": task numbers (1-based, as the progress counts them).</summary>
+    static List<int> TaskNumbers(Dictionary<string, string> f, string name)
+    {
+        if (!f.TryGetValue(name, out var v)) return [];
+        var list = new List<int>();
+        foreach (var part in v.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            list.Add(int.TryParse(part, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n >= 1 ? n : throw new ArgumentException($"--{name} 取任务序号（从 1 起），例如 --{name} 2 或 --{name} 1,3"));
+        return list.Count > 0 ? list : throw new ArgumentException($"--{name} 需要任务序号");
     }
 
     /// <summary>A single-purpose `set` is journaled under its purpose ("摘要", "提醒"…), so `log` reads naturally.</summary>
@@ -209,7 +234,7 @@ public static class Cli
             if (a.StartsWith("--") && a.Length > 2)
             {
                 var name = a[2..].ToLowerInvariant();
-                bool takesValue = name is "remind" or "color" or "summary" or "if-rev" or "if-input" or "image";
+                bool takesValue = name is "remind" or "color" or "summary" or "if-rev" or "if-input" or "image" or "add-task" or "check" or "uncheck";
                 if (takesValue && i + 1 >= list.Count) throw new ArgumentException($"--{name} 需要一个值");
                 flags[name] = takesValue ? list[++i] : "1";
             }
@@ -223,7 +248,7 @@ public static class Cli
     {
         if (pos.Count <= i) return null;
         if (pos[i] != "-") return string.Join(" ", pos.Skip(i));
-        if (flags.GetValueOrDefault("summary") == "-") throw new ArgumentException("正文和 --summary 不能同时从标准输入读取");
+        if (flags.GetValueOrDefault("summary") == "-" || flags.GetValueOrDefault("add-task") == "-") throw new ArgumentException("标准输入只能读一次：正文、--summary、--add-task 只能有一个是 -");
         return Stdin(readStdin, "正文");
     }
 
@@ -293,6 +318,7 @@ public static class Cli
         free = c.Free,
         overdue = c.Overdue,
         progress = new { done = c.Progress.Done, total = c.Progress.Total },
+        tasks = Markdown.Parse(c.Body).Where(b => b.Kind == BlockKind.Task).Select((b, i) => new { n = i + 1, done = b.Checked, text = b.Text }).ToList(),
         remind_at = c.RemindAt is long t ? Iso(t) : null,
         done_at = c.DoneAt is long d ? Iso(d) : null,
         deleted_at = c.DeletedAt is long x ? Iso(x) : null,
@@ -313,20 +339,22 @@ public static class Cli
     };
 
     public const string Help = """
-        PinCC — 桌面悬浮卡片（每张卡片 = 一件待办：备忘 / 网址 / 文档 / 图片）。命令行即文本接口，供人和 CLI LLM 工具读写。
+        PinCC（Pin Carbon Copy）— 桌面悬浮卡片（每张卡片 = 一件待办：备忘 / 网址 / 文档 / 图片）。命令行即文本接口，供人和 CLI LLM 工具读写。
 
         PinCC list [--all] [--json|--md]        列出卡片（提醒最近的在前，其余按新建时间由近及远）；--md 为整篇 Markdown
         PinCC show <id> [--json]                查看一张卡片
         PinCC add <文字|-> [选项]                新建卡片；正文第一行是网址或文件路径时即为链接/文档卡片
-        PinCC set <id> [文字|-] [--append] [选项] [--if-rev N] [--if-input H]
+        PinCC set <id> [文字|-] [--append] [选项] [--check N] [--uncheck N] [--if-rev N] [--if-input H]
                                                 修改卡片。--if-rev：仅当版本仍为 N 时写入；--if-input：仅当摘要的输入
                                                 （笔记正文或网页/文档正文，见 input_hash）仍为 H 时写入
+                                                --check / --uncheck：勾选 / 取消第 N 个任务（从 1 起，可写 1,3；序号见 show --json 的 tasks）
         PinCC rm <id> [--json]                  删除（可恢复）
         PinCC log [N] [--json]                  最近的操作（第一列为操作组编号）
         PinCC restore <组编号> [--json]          撤销整组操作：该组改过的内容回到之前，其他改动不受影响
         PinCC help                              本说明
 
         选项：--summary <文字|->  --remind <时间|off>  --done | --undone  --color <0-8|auto>  --top | --normal  --image <图片文件>  --json
+              --add-task <文字|->  加任务：每行一项，加在最后一个任务之后（没有任务时加在末尾），不用改写整段正文
         时间：+30m  2h  18:30  下午3点  今晚  明早  明天 9点  后天晚上  周五 10:00  下周一  9/25 14:00  2026-10-01 08:00
         "-" 表示从标准输入读取（UTF-8，一次命令只能读一次）；标准输入为空时报错、不写入（清空摘要用 --summary ""）。
         退出码：0 成功 · 1 用法错误（含未知选项）· 2 找不到 · 3 冲突（--if-rev / --if-input 不符，未写入）· 4 数据库忙
@@ -338,6 +366,7 @@ public static class Cli
           期间内容变了则退出码 3、不写入（重新读取再总结）；写入后内容再改动，摘要会标为过时。
           摘要格式：第一行 **一句话结论**，然后 3–6 条 "- " 要点，需要行动的事项用 "- [ ] "。
         - 新建：PinCC add - --remind "明天 9点" < note.md
+        - 清单：PinCC set <id> --add-task "买牛奶"；PinCC set <id> --check 2（只改那一行，不会覆盖别处的改动）
         - 未经用户要求不要 rm 或 --done；每次写入都可以用 log / restore 撤销。
         - 从 WSL 调用 PinCC.exe（经 Windows 路径），不要直接打开 pincc.db。
 

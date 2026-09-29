@@ -137,6 +137,25 @@ Eq(Url("[w](https://en.wikipedia.org/wiki/Foo_(bar))"), "https://en.wikipedia.or
 True(Markdown.Inlines("[w](https://en.wikipedia.org/wiki/Foo_(bar)) x").Any(r => r.Text == "w"), "link text with paren target");
 Eq(Url("[w](https://x.y/a) (note)"), "https://x.y/a", "link followed by a parenthesis");
 Eq(Markdown.Plain("- [ ] buy milk"), "buy milk", "plain task");
+// checklist helpers: add, set, number, fold
+Eq(Markdown.AddTasks("# 购物\n- [ ] 牛奶\n- [x] 面包\n\n备注", "鸡蛋"), "# 购物\n- [ ] 牛奶\n- [x] 面包\n- [ ] 鸡蛋\n\n备注", "add after the last task, before later text");
+Eq(Markdown.AddTasks("- [ ] a\n  - detail of a\nafter", "b"), "- [ ] a\n  - detail of a\n- [ ] b\nafter", "add after the last task's sub-items");
+Eq(Markdown.AddTasks("- [ ] a\n  - [ ] sub", "b"), "- [ ] a\n  - [ ] sub\n- [ ] b", "added at the list's outer indent");
+Eq(Markdown.AddTasks("  * [ ] a", "b"), "  * [ ] a\n  * [ ] b", "keeps the list's marker and indent");
+Eq(Markdown.AddTasks("清单\n", "x\n\n- [ ] y\n[] z\n- w"), "清单\n- [ ] x\n- [ ] y\n- [ ] z\n- [ ] w", "no task yet: appended, one per line, typed markers not doubled");
+Eq(Markdown.AddTasks("", "a"), "- [ ] a", "empty body");
+Eq(Markdown.AddTasks("- [ ] a", "  \n "), "- [ ] a", "blank text adds nothing");
+Eq(Markdown.AddTasks("```\n- [ ] fenced\n```", "a"), "```\n- [ ] fenced\n```\n- [ ] a", "fenced lines are not tasks");
+Eq(Markdown.AddTasks("- [ ] a\r\n- [ ] b", "c"), "- [ ] a\n- [ ] b\n- [ ] c", "CRLF body");
+Eq(string.Join(",", Markdown.TaskLines("x\n- [ ] a\n```\n- [ ] no\n```\n  - [x] b")), "1,5", "task lines skip fences");
+Eq(Markdown.SetTask("- [ ] a\n- [x] b", 0, true), "- [x] a\n- [x] b", "set checks");
+Eq(Markdown.SetTask("- [ ] a\n- [x] b", 1, true), "- [ ] a\n- [x] b", "set is idempotent");
+Eq(Markdown.SetTask("- [ ] a\n- [X] b", 1, false), "- [ ] a\n- [ ] b", "set unchecks [X]");
+Eq(Markdown.SetTask("plain", 0, true), "plain", "set leaves non-tasks alone");
+var foldBlocks = Markdown.Parse("# T\n- [x] a\n  - note a\n- [ ] b\n- [x] c\n- [x] d\n  - [ ] d1\ntext");
+Eq(string.Join(",", Markdown.FoldDone(foldBlocks)!.Order()), "1,2,4,5,6", "fold: checked tasks with their sub-items");
+Eq(Markdown.FoldDone(Markdown.Parse("- [x] a\n- [x] b\n- [ ] c")), null, "fold needs 3 checked");
+Eq(Markdown.FoldDone(Markdown.Parse("- [x] a\n- [x] b\n- [x] c")), null, "no fold when all are checked");
 
 // ---------------- Card (derived state) ----------------
 var c1 = new Card { Id = 1, CreatedAt = 100 };
@@ -181,6 +200,16 @@ Eq(new Card { Body = "https://x.com/p\n\n## 标题\n" }.Title, "标题", "title 
 Eq(new Card { Body = "- [x] a", Summary = "- [ ] ignored" }.Progress, (1, 1), "summary tasks don't count");
 Eq(new Card { Body = "\n\n## Hi there\nmore" }.Title, "Hi there", "title");
 Eq(new Card { Body = "notes #Work stuff" }.Tag, "work", "tag");
+var shop = new Card { Body = "## 购物\n- [x] 牛奶\n- [ ] **鸡蛋**\n- [ ] 面包" };
+Eq(shop.NextTask, "鸡蛋", "next task: first open one, markdown stripped");
+Eq(shop.TitleIsTask, false, "a heading is the title");
+var bare = new Card { Body = "- [x] 牛奶\n- [ ] 鸡蛋" };
+Eq(bare.TitleIsTask, true, "a checklist without heading: the title is a task");
+Eq(bare.NextTask, "鸡蛋", "next task after a checked title");
+Eq(new Card { Body = "- [x] a\n- [x] b" }.NextTask, null, "all done: no next task");
+Eq(new Card { Body = "- [ ]\n- [ ] b" }.NextTask, "b", "empty items are skipped");
+Eq(new Card { Body = "plain note" }.NextTask, null, "no tasks: no next task");
+Eq(new Card { Body = "https://x.com/p\n- [ ] read it", Meta = new CardMeta { Src = "https://x.com/p", Title = "页面" }.ToJson() }.TitleIsTask, false, "link title is not a task");
 var withMeta = new Card { Body = "https://x.org/p", Meta = new CardMeta { Src = "https://x.org/p", Title = "页面标题", TextHash = "abc", SumHash = "abc" }.ToJson(), Summary = "**s**" };
 Eq(withMeta.Title, "页面标题", "title from meta");
 Eq(withMeta.SummaryStale, false, "summary fresh");
@@ -444,6 +473,23 @@ using (var watch = new Store())
     Cmd("", "log", "5");
     Eq(watch.DataVersion, v, "list/show/log write nothing");
 }
+// checklist items through the CLI: add, check, uncheck by number
+var list = Cmd("", "add", "## 周末", "--add-task", "洗车", "--json");
+Eq(list.Code, 0, "add with --add-task");
+var lid = System.Text.Json.JsonDocument.Parse(list.Out).RootElement.GetProperty("id").GetInt64().ToString(CultureInfo.InvariantCulture);
+Eq(Cmd("买菜\n- [ ] 取快递\n", "set", lid, "--add-task", "-").Code, 0, "--add-task - reads one item per line");
+Eq(Cmd("", "set", lid, "--check", "1,3").Code, 0, "--check list");
+Eq(Cmd("", "set", lid, "--uncheck", "3", "--add-task", "理发").Code, 0, "--uncheck with --add-task");
+using (var s = new Store()) Eq(s.Get(long.Parse(lid))!.Body, "## 周末\n- [x] 洗车\n- [ ] 买菜\n- [ ] 取快递\n- [ ] 理发", "checklist edited in place");
+var shownTasks = Cmd("", "show", lid, "--json").Out;
+True(shownTasks.Contains("\"n\": 4") && shownTasks.Contains("\"text\": \"理发\""), "json lists numbered tasks");
+Eq(Cmd("", "set", lid, "--check", "9").Code, 1, "--check out of range");
+Eq(Cmd("", "set", lid, "--check", "0").Code, 1, "--check 0");
+Eq(Cmd("", "set", lid, "--check", "x").Code, 1, "--check not a number");
+Eq(Cmd("a", "set", lid, "--summary", "-", "--add-task", "-").Code, 1, "stdin read once");
+Eq(Cmd("", "set", lid, "--add-task", " ").Code, 1, "blank --add-task");
+Eq(Cmd("", "add", "x", "--check", "1").Code, 1, "--check is for set");
+using (var s = new Store()) Eq(s.Get(long.Parse(lid))!.Progress, (1, 4), "failed commands wrote nothing");
 Environment.SetEnvironmentVariable("PINCC_HOME", null);
 try { Directory.Delete(cliHome, true); } catch { }
 
