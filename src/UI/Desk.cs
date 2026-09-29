@@ -39,6 +39,7 @@ public sealed class Desk
     Toast? _toast;
     Group? _gesture;
     CardWindow? _peek;
+    Drag? _drag;
     long _version, _nextTemp = -1;
     bool _hidden, _deferred, _pendingAlarm, _forceNext;
     (string Device, IntPtr Hwnd)? _fullscreen;
@@ -206,6 +207,7 @@ public sealed class Desk
         _overflowHidden.Remove(w);
         _reenrich.Remove(w);
         if (_peek == w) _peek = null;
+        if (_drag?.W == w) _drag = null;
         w.Close();
     }
 
@@ -637,19 +639,34 @@ public sealed class Desk
     }
 
     /// <summary>
-    /// After a user drag/resize (the only time geometry is saved): a move makes the card free (DIP offset from its
-    /// monitor's work area); a resize stores the size (a width-only resize keeps a fit-content height). A dropped card is
-    /// pushed clear of other free cards and the hub; a resized free card is trimmed back instead of being moved.
+    /// After a user drag/resize (the only time geometry is saved): a tiled card dropped into the flow takes the slot shown
+    /// for it; any other move makes the card free (DIP offset from its monitor's work area); a resize stores the size (a
+    /// width-only resize keeps a fit-content height) — except that an unpinned card dragged wider than its stored width is
+    /// only wider for now (<see cref="CardWindow.Wide"/>). A dropped card is pushed clear of other free cards and the hub;
+    /// a resized free card is trimmed back instead of being moved.
     /// </summary>
     public void OnUserMoved(CardWindow w, Px start, double startScale)
     {
+        var drag = _drag?.W == w ? _drag : null;
+        _drag = null;
+        if (drag is { At: >= 0 }) { Reorder(drag); return; }
         var r = w.Rect;
+        if (r == start) { if (drag != null) Relayout(force: true); return; }
         var s = Screens.Of(r);
         double w0 = start.W / startScale, h0 = start.H / startScale, w1 = s.Dip(r.W), h1 = s.Dip(r.H);
         bool widthChanged = Math.Abs(w1 - w0) > 1, heightChanged = Math.Abs(h1 - h0) > 1;
         bool resized = widthChanged || heightChanged;
         bool free = w.Card.Free || !resized;
         w.LayoutPill = false;
+        if (resized && w1 > w.Card.W + 1 && !w.Card.Topmost && !w.Pill && !w.Card.ImageOnly)
+        {
+            w.Wide = Math.Round(w1); // held where the user left it until the card is neither pinned nor active
+            if (heightChanged) Change(w, c => c.H = Math.Round(h1), "resize");
+            w.Render();
+            Relayout(force: true);
+            return;
+        }
+        if (resized) w.Wide = null;
         if (free)
         {
             var obstacles = _cards.Values.Where(o => o != w && o.IsVisible && o.Card.Free && ScreenOf(o).Id == s.Id).Select(o => o.Rect)
@@ -664,6 +681,59 @@ public sealed class Desk
             c.Mon = s.Id;
             if (free) { c.Free = true; c.X = s.Dip(r.X - s.Work.X); c.Y = s.Dip(r.Y - s.Work.Y); }
         }, resized ? "resize" : "move");
+        Relayout(force: true);
+    }
+
+    /// <summary>
+    /// A tiled card being dragged (each move): the cards of the monitor under it make room at the slot nearest to it;
+    /// away from the flow they close up, and a drop there makes it free. Free and held cards just move.
+    /// </summary>
+    public void Dragging(CardWindow w)
+    {
+        if (w.Card.Free || Held(w)) return;
+        var s = Screens.Of(w.Rect).Id;
+        if (_drag?.W == w && _drag.Screen == s && _drag.Nearest() == _drag.At) return;
+        _drag = new Drag(w, s);
+        DoLayout(force: true); // finds the slots and the nearest one, and opens it
+    }
+
+    /// <summary>
+    /// A tiled card dragged over a monitor: that monitor's tiled order without it, the rect it would get at each index of
+    /// that order (null: no room), the indexes it may take (it does not pass cards with a reminder), and the index it would
+    /// drop at (-1: away from the flow).
+    /// </summary>
+    sealed class Drag(CardWindow w, string screen)
+    {
+        public CardWindow W => w;
+        public string Screen => screen;
+        public List<CardWindow> Order = [];
+        public List<Px?> Slots = [];
+        public int Lo, Hi, At = -1;
+
+        /// <summary>Over the flow (any of its slots): the allowed slot whose center is closest to the card's; elsewhere -1.</summary>
+        public int Nearest()
+        {
+            var r = w.Rect;
+            if (!Slots.Any(p => p?.Intersects(r) == true)) return -1;
+            return Enumerable.Range(Lo, Hi - Lo + 1).Where(k => Slots[k] != null)
+                .OrderBy(k => Math.Abs(Slots[k]!.Value.CX - r.CX) + Math.Abs(Slots[k]!.Value.CY - r.CY)).DefaultIfEmpty(-1).First();
+        }
+    }
+
+    /// <summary>
+    /// A drop into the tiled flow: the card takes the slot it was shown in, on that monitor. The cards without a reminder
+    /// get their ranks dealt out again in the new order, so only the cards it passed are written. One undo step.
+    /// </summary>
+    void Reorder(Drag d)
+    {
+        var order = d.Order.Where(_cards.ContainsValue).ToList();
+        order.Insert(Math.Min(d.At, order.Count), d.W);
+        var g = Store.Begin();
+        if (d.W.Card.Mon != d.Screen) Change(d.W, c => c.Mon = d.Screen, "move", g);
+        var ranked = order.Where(x => x.Card.RemindAt == null).ToList();
+        var ranks = Card.Ranks(ranked.Select(x => x.Card));
+        for (int i = 0; i < ranked.Count; i++)
+            if (ranked[i].Card.Rank != ranks[i]) { var rank = ranks[i]; Change(ranked[i], c => c.Ord = rank, "move", g); }
         Relayout(force: true);
     }
 
@@ -686,15 +756,15 @@ public sealed class Desk
 
     // ================= bulk (always all monitors; the hub, hotkeys and menus mean the same thing) =================
 
-    /// <summary>平铺显示: every card shown, expanded and back in the tiled flow (one undo step); normal cards raised.</summary>
+    /// <summary>平铺显示: every card shown and back in the tiled flow (one undo step); collapsed cards stay collapsed; normal cards raised.</summary>
     public void Tile()
     {
         _hidden = false;
         _peek = null;
         var g = Store.Begin();
-        foreach (var w in _cards.Values.Where(w => w.Ref > 0 && w.Strip == null && (w.Card.Free || w.Card.Collapsed)).ToList())
-            Change(w, c => { c.Free = false; c.Collapsed = false; }, "tile", g);
-        foreach (var w in _cards.Values.Where(w => w.LayoutPill).ToList()) { w.LayoutPill = false; w.Render(); }
+        foreach (var w in _cards.Values.Where(w => w.Ref > 0 && w.Strip == null && w.Card.Free).ToList())
+            Change(w, c => c.Free = false, "tile", g);
+        foreach (var w in _cards.Values.Where(w => w.LayoutPill || w.Wide != null).ToList()) { w.LayoutPill = false; w.Wide = null; w.Render(); }
         DoLayout(force: true);
         foreach (var w in _cards.Values.Where(w => w.IsVisible)) Native.Front(w.Hwnd, w.Topmost); // also lifts cards above Win+D
     }
@@ -775,7 +845,10 @@ public sealed class Desk
         else if (_deferred) Relayout();
     }
 
-    public void Resized(CardWindow w) => Relayout(force: w.Editing || w.Adding || w == _peek);
+    public void Resized(CardWindow w) => Relayout(force: Held(w));
+
+    /// <summary>Kept where it is by what the user is doing with it: editing, adding, finishing, peeking, or a width dragged out for now.</summary>
+    bool Held(CardWindow w) => w.Editing || w.Adding || w.Strip != null || w == _peek || w.Wide != null;
 
     /// <summary>Opens a source or link: pages and documents with their default apps; programs are only shown in Explorer.</summary>
     public void Open(string target)
@@ -813,9 +886,9 @@ public sealed class Desk
 
     /// <summary>
     /// Per monitor, in three passes: hubs and free cards (pushed clear of each other, display-only) are obstacles;
-    /// busy cards (editing, finishing, peeking, being dragged) keep their place and may only grow into free space;
-    /// the rest are tiled in display order. Waits while the pointer rests on a tiled card of that monitor unless forced,
-    /// so nothing moves under the mouse. Never writes positions.
+    /// busy cards (held, or being moved or resized) keep their place and may only grow into free space; the rest are
+    /// tiled in display order — a tiled card being dragged only keeps its slot open. Waits while the pointer rests on a
+    /// tiled card of that monitor unless forced, so nothing moves under the mouse. Never writes positions.
     /// </summary>
     void DoLayout(bool force)
     {
@@ -827,7 +900,8 @@ public sealed class Desk
         var moves = new List<(CardWindow W, Px R, Screen S)>();
         _deferred = false;
         var all = _cards.Values.ToList();
-        bool Busy(CardWindow w) => w.Editing || w.Adding || w.Strip != null || w == _peek || w.InSizeMove;
+        var drag = _drag;
+        bool Busy(CardWindow w) => Held(w) || w.InSizeMove && w != drag?.W;
 
         // 1. free cards
         foreach (var w in all.Where(w => !Busy(w) && w.Card.Free))
@@ -863,7 +937,7 @@ public sealed class Desk
         }
 
         // 3. tiled cards
-        foreach (var w in all.Where(w => !Busy(w) && !(w.Card.Free && Screens.ById(w.Card.Mon) != null)))
+        foreach (var w in all.Where(w => !Busy(w) && w != drag?.W && !(w.Card.Free && Screens.ById(w.Card.Mon) != null)))
             autos[(Screens.ById(w.Card.Mon) ?? primary).Id].Add(w); // a missing monitor's cards tile on the primary until it returns
 
         foreach (var s in screens)
@@ -871,18 +945,33 @@ public sealed class Desk
             var list = autos[s.Id];
             if (!force && list.Any(w => w.Hovered && w.IsVisible)) { _deferred = true; continue; }
             list.Sort((a, b) => Card.Compare(a.Card, b.Card));
-            var items = list.Select(w =>
+            (int W, int H, int PillH) Item(CardWindow w)
             {
                 bool img = w.Card.ImageOnly, collapsed = w.Card.Collapsed && !w.Card.Overdue;
                 int pill = s.Px(img ? CardWindow.Thumb : CardWindow.PillH);
                 int width = collapsed && img ? pill : s.Px(w.Expanded.Width);
                 return (width, collapsed ? pill : s.Px(w.Expanded.Height), pill);
-            }).ToList();
-            var slots = Layout.Tile(s.Work, items, obstacles[s.Id], s.Px(Gap), s.Px(Inset), Corner);
+            }
+            List<Slot> Flow(IReadOnlyList<(int, int, int)> sizes) => Layout.Tile(s.Work, sizes, obstacles[s.Id], s.Px(Gap), s.Px(Inset), Corner);
+            var items = list.Select(Item).ToList();
+            if (drag?.Screen == s.Id)
+            {
+                // Where the dragged card could go: the rect it would get at each index. Cards with a reminder keep their time order.
+                var it = Item(drag.W);
+                drag.Order = list.ToList();
+                drag.Slots = Enumerable.Range(0, list.Count + 1)
+                    .Select(k => Flow([.. items.Take(k), it, .. items.Skip(k)])[k] is { Hidden: false } slot ? slot.Rect : (Px?)null).ToList();
+                drag.Lo = list.Count(w => w.Card.RemindAt != null && Card.Compare(w.Card, drag.W.Card) < 0);
+                drag.Hi = drag.W.Card.RemindAt == null ? list.Count : drag.Lo;
+                drag.At = drag.Nearest();
+                if (drag.At >= 0) { list.Insert(drag.At, drag.W); items.Insert(drag.At, it); }
+            }
+            var slots = Flow(items);
             int hidden = 0;
             for (int i = 0; i < list.Count; i++)
             {
                 var w = list[i];
+                if (w == drag?.W) continue; // being dragged: its slot stays open
                 if (slots[i].Hidden) { _overflowHidden.Add(w); hidden++; continue; }
                 _overflowHidden.Remove(w);
                 if (w.LayoutPill != slots[i].Pill) { w.LayoutPill = slots[i].Pill; w.Render(); }
@@ -1599,6 +1688,8 @@ public sealed class Desk
         SampleCard("checklist-adding", "## 周末\n- [ ] 洗车", w => w.StartAdd());
         SampleCard("checklist-pill", list, w => { w.Card.Collapsed = true; w.Render(); });
         SampleCard("checklist-pill-bare", "- [x] 洗车\n- [ ] 买菜", w => { w.Card.Collapsed = true; w.Render(); });
+        // A checklist taller than its card: one line per item, the rest scrolls.
+        SampleCard("checklist-long", "", card: new Card { Body = "## 本周\n" + string.Join("\n", Enumerable.Range(1, 12).Select(i => $"- [ ] 第 {i} 项：一条足够长、平时会折成两行的任务描述")), W = 260, H = 220 });
         // A picture card's action bar on a bright, busy picture (an overdue card shows its row without hover).
         var bright = new System.Windows.Media.DrawingVisual();
         using (var dc = bright.RenderOpen())
@@ -1658,7 +1749,7 @@ public sealed class Desk
     /// <summary>
     /// Diagnostics (env PINCC_STEPS, with PINCC_SNAPSHOT): one scripted gesture through the same methods the mouse and
     /// keyboard use — "tile", "collapse", "hide", "undo", "new[:text]", "commit", "done:id", "del:id", "fold:id",
-    /// "peek:id", "pin:id", "zoom:id", "notify:text".
+    /// "peek:id", "pin:id", "zoom:id", "notify:text", "drag:id:dx,dy" (move by DIP and drop), "widen:id:dw" (drag the left edge).
     /// </summary>
     public void Step(string step)
     {
@@ -1680,6 +1771,14 @@ public sealed class Desk
             case "pin" when w != null: TogglePin(w); break;
             case "zoom" when w != null: Zoom(w, 1.6); break;
             case "notify": Notify(arg); break;
+            case "drag" or "widen" when arg.Split(':', ',') is [var key, .. var n] && _cards.GetValueOrDefault(long.Parse(key)) is { } d:
+                var s = ScreenOf(d);
+                var start = d.Rect;
+                var v = n.Select(x => s.Px(double.Parse(x, CultureInfo.InvariantCulture))).ToArray();
+                d.Place(parts[0] == "drag" ? start.Offset(v[0], v[1]) : new Px(start.X - v[0], start.Y, start.W + v[0], start.H));
+                if (parts[0] == "drag") Dragging(d); // as WM_MOVING, then WM_EXITSIZEMOVE
+                OnUserMoved(d, start, s.Scale);
+                break;
             default: throw new ArgumentException("unknown step " + step);
         }
     }

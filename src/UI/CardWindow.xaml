@@ -13,9 +13,11 @@
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
-            <!-- Rendered markdown (view) and raw source (edit) share one clipped viewport: never a scrollbar. -->
+            <!-- Rendered markdown (view) and raw source (edit) share one clipped viewport: never a scrollbar (the wheel scrolls). -->
             <Grid x:Name="Viewport" Margin="12,10,12,0" ClipToBounds="True">
-                <StackPanel x:Name="Stack" VerticalAlignment="Top"/>
+                <ScrollViewer x:Name="Scroller" Focusable="False" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel x:Name="Stack" VerticalAlignment="Top"/>
+                </ScrollViewer>
                 <TextBox x:Name="Editor" Visibility="Collapsed" Background="Transparent" BorderThickness="0" Padding="0" Margin="0,0,0,10"
                          AcceptsReturn="True" AcceptsTab="False" TextWrapping="Wrap" SpellCheck.IsEnabled="False"
                          VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled"

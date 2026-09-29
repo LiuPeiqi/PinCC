@@ -163,7 +163,7 @@ public sealed class HubWindow : Window
         _dial.Children.Clear();
         var items = new (string Glyph, string Tip, Action Act)[]
         {
-            ("\uE8A9", "平铺显示（全部显示、展开、回到平铺）", _desk.Tile),
+            ("\uE8A9", "平铺显示（全部显示、回到平铺；折叠的保持折叠）", _desk.Tile),
             (_desk.Cards.Any(w => w.Ref > 0 && !w.Card.Collapsed) ? "\uE70E" : "\uE70D", "全部折叠 / 展开", _desk.CollapseAll),
             (_desk.Hidden ? "\uE7B3" : "\uE921", _desk.Hidden ? "恢复显示" : "最小化全部", _desk.ToggleHidden),
         };

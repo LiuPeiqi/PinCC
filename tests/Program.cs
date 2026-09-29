@@ -165,6 +165,12 @@ var c4 = new Card { Id = 4, CreatedAt = 60, RemindAt = 1000 };
 var sorted = new List<Card> { c1, c2, c3, c4 };
 sorted.Sort(Card.Compare);
 Eq(string.Join(",", sorted.Select(c => c.Id)), "4,3,2,1", "sort: reminders soonest first, then newest");
+var c5 = new Card { Id = 5, CreatedAt = 10, Ord = 150 }; // dragged between c2 and c1
+sorted = [c1, c2, c3, c4, c5];
+sorted.Sort(Card.Compare);
+Eq(string.Join(",", sorted.Select(c => c.Id)), "4,3,2,5,1", "sort: a dragged card sits at its rank among the cards without a reminder");
+Eq(string.Join(",", Card.Ranks([c1, c5, c2])), "200,150,100", "ranks: the ranks held, dealt out highest first");
+Eq(string.Join(",", Card.Ranks([new Card { CreatedAt = 7 }, new Card { CreatedAt = 7 }, new Card { CreatedAt = 6 }])), "7,6,5", "ranks: ties made strictly decreasing");
 var link = new Card { Body = "https://example.com/a?b=1\n为什么重要：读一下" };
 Eq(link.Src, "https://example.com/a?b=1", "src from first line");
 Eq(link.Kind, "link", "kind link");
@@ -405,6 +411,33 @@ using (var s = new Store(home2))
     True(s.Ops(1)[0].Grp > 900, "upgraded journal continues numbering");
 }
 try { Directory.Delete(home2, true); } catch { }
+
+// a version 1 database (before the drag order) gains the ord column and keeps its cards
+var home1 = Path.Combine(Path.GetTempPath(), "pincc-test-" + Guid.NewGuid().ToString("N")[..8]);
+Directory.CreateDirectory(home1);
+using (var db = new Db(Path.Combine(home1, "pincc.db")))
+    db.Script("""
+        CREATE TABLE cards(id INTEGER PRIMARY KEY AUTOINCREMENT, rev INTEGER NOT NULL DEFAULT 0, body TEXT NOT NULL DEFAULT '', images TEXT, summary TEXT, meta TEXT,
+          color INTEGER, topmost INTEGER NOT NULL DEFAULT 0, opacity REAL NOT NULL DEFAULT 1, collapsed INTEGER NOT NULL DEFAULT 0, free INTEGER NOT NULL DEFAULT 0,
+          mon TEXT, x REAL NOT NULL DEFAULT 0, y REAL NOT NULL DEFAULT 0, w REAL NOT NULL DEFAULT 260, h REAL,
+          remind_at INTEGER, done_at INTEGER, deleted_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE ops(id INTEGER PRIMARY KEY AUTOINCREMENT, grp INTEGER NOT NULL, at INTEGER NOT NULL, card_id INTEGER NOT NULL, op TEXT NOT NULL, before TEXT, cols TEXT);
+        CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO cards(body, created_at, updated_at) VALUES('old', 1, 1);
+        PRAGMA user_version = 1;
+        """);
+using (var s = new Store(home1))
+{
+    var old = s.Active().Single();
+    Eq((old.Body, old.Ord, old.Rank), ("old", (double?)null, 1.0), "v1 card kept, ranked by creation time");
+    var g = s.Begin();
+    s.Mutate(g, old.Id, c => c.Ord = 5, "move");
+    Eq(s.Get(old.Id)!.Ord, 5.0, "ord stored");
+    s.Restore(g.Number);
+    Eq(s.Get(old.Id)!.Ord, null, "ord undone");
+    Eq(Convert.ToInt32(s.Db.Scalar("PRAGMA user_version")), Store.SchemaVersion, "v1 upgraded");
+}
+try { Directory.Delete(home1, true); } catch { }
 
 // ---------------- CLI ----------------
 var cliHome = Path.Combine(Path.GetTempPath(), "pincc-test-" + Guid.NewGuid().ToString("N")[..8]);

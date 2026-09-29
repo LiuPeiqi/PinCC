@@ -26,7 +26,7 @@ public sealed class Group
 /// </summary>
 public sealed partial class Store : IDisposable
 {
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
     public string Home { get; }
     public string ImgDir { get; }
     public Db Db { get; }
@@ -40,7 +40,7 @@ public sealed partial class Store : IDisposable
           color INTEGER, topmost INTEGER NOT NULL DEFAULT 0, opacity REAL NOT NULL DEFAULT 1,
           collapsed INTEGER NOT NULL DEFAULT 0, free INTEGER NOT NULL DEFAULT 0,
           mon TEXT, x REAL NOT NULL DEFAULT 0, y REAL NOT NULL DEFAULT 0, w REAL NOT NULL DEFAULT 260, h REAL,
-          remind_at INTEGER, done_at INTEGER, deleted_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+          remind_at INTEGER, done_at INTEGER, deleted_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, ord REAL);
         -- AUTOINCREMENT: a group is numbered by its first op id, which must never come back after a purge.
         -- cols: the columns the group changed on that card (restore writes back only those).
         CREATE TABLE IF NOT EXISTS ops(
@@ -66,7 +66,9 @@ public sealed partial class Store : IDisposable
     int UserVersion() => Convert.ToInt32(Db.Scalar("PRAGMA user_version"));
 
     /// <summary>A database from a pre-release build (journal without per-op columns). Remove before release.</summary>
-    bool PreRelease() => UserVersion() == SchemaVersion && Convert.ToInt64(Db.Scalar("SELECT count(*) FROM pragma_table_info('ops') WHERE name='cols'")) == 0;
+    bool PreRelease() => UserVersion() >= 1 && !HasColumn("ops", "cols");
+
+    bool HasColumn(string table, string column) => Convert.ToInt64(Db.Scalar($"SELECT count(*) FROM pragma_table_info('{table}') WHERE name=?", column)) > 0;
 
     void Migrate() => Db.Tx(() =>
     {
@@ -75,6 +77,7 @@ public sealed partial class Store : IDisposable
         if (pre) Db.Script("DROP INDEX IF EXISTS ops_grp; DROP INDEX IF EXISTS ops_card; ALTER TABLE ops RENAME TO ops_old;");
         Db.Script(Schema);
         if (pre) Db.Script("INSERT INTO ops(id,grp,at,card_id,op,before) SELECT id,grp,at,card_id,op,before FROM ops_old; DROP TABLE ops_old;");
+        if (!HasColumn("cards", "ord")) Db.Script("ALTER TABLE cards ADD COLUMN ord REAL"); // version 1 → 2: the order of dragged cards
         Db.Script($"PRAGMA user_version = {SchemaVersion}");
     });
 

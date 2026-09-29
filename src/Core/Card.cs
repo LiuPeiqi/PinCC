@@ -34,18 +34,20 @@ public sealed partial class Card
     public long? DeletedAt { get; set; }
     public long CreatedAt { get; set; }
     public long UpdatedAt { get; set; }
+    /// <summary>Where the user dragged the card in the tiled order (see <see cref="Rank"/>); null = by creation time.</summary>
+    public double? Ord { get; set; }
 
     /// <summary>Writable columns, in the same order as <see cref="Values"/> (id, rev, updated_at are managed by Store).</summary>
     public static readonly string[] Columns =
     {
         "body", "images", "summary", "meta", "color", "topmost", "opacity", "collapsed", "free", "mon", "x", "y", "w", "h",
-        "remind_at", "done_at", "deleted_at", "created_at",
+        "remind_at", "done_at", "deleted_at", "created_at", "ord",
     };
 
     public object?[] Values() => new object?[]
     {
         Body, Images.Count == 0 ? null : JsonSerializer.Serialize(Images), Summary, Meta, Color, Topmost, Opacity, Collapsed, Free, Mon,
-        X, Y, W, H, RemindAt, DoneAt, DeletedAt, CreatedAt,
+        X, Y, W, H, RemindAt, DoneAt, DeletedAt, CreatedAt, Ord,
     };
 
     public static Card FromRow(IReadOnlyDictionary<string, object?> r) => new()
@@ -71,6 +73,7 @@ public sealed partial class Card
         DeletedAt = N(r["deleted_at"]),
         CreatedAt = L(r["created_at"]),
         UpdatedAt = L(r["updated_at"]),
+        Ord = r["ord"] is null ? null : D(r["ord"], 0),
     };
 
     static long L(object? v) => v is null ? 0 : Convert.ToInt64(v);
@@ -209,13 +212,27 @@ public sealed partial class Card
         _ => Rotation[(int)(Math.Max(Id, 0) % 7)],
     };
 
-    /// <summary>Soonest reminder first (overdue ones earliest); then newest first (requirement #10).</summary>
+    /// <summary>Sort key after the reminders, highest first: the creation time (newest first) until the user drags the card elsewhere.</summary>
+    [JsonIgnore] public double Rank => Ord ?? CreatedAt;
+
+    /// <summary>Soonest reminder first (overdue ones earliest); then by <see cref="Rank"/> (requirement #10).</summary>
     public static int Compare(Card a, Card b)
     {
-        if (a.RemindAt is long ra && b.RemindAt is long rb) return ra != rb ? ra.CompareTo(rb) : b.CreatedAt.CompareTo(a.CreatedAt);
+        if (a.RemindAt is long ra && b.RemindAt is long rb) return ra != rb ? ra.CompareTo(rb) : b.Rank.CompareTo(a.Rank);
         if (a.RemindAt != null) return -1;
         if (b.RemindAt != null) return 1;
-        return b.CreatedAt != a.CreatedAt ? b.CreatedAt.CompareTo(a.CreatedAt) : b.Id.CompareTo(a.Id);
+        return b.Rank != a.Rank ? b.Rank.CompareTo(a.Rank) : b.Id.CompareTo(a.Id);
+    }
+
+    /// <summary>
+    /// Ranks for <paramref name="cards"/> after a drop put them in a new order: the ranks they already hold, highest first
+    /// and kept strictly decreasing, so position i takes element i and only the cards whose place changed get a new one.
+    /// </summary>
+    public static double[] Ranks(IEnumerable<Card> cards)
+    {
+        var ranks = cards.Select(c => c.Rank).OrderDescending().ToArray();
+        for (int i = 1; i < ranks.Length; i++) if (ranks[i] >= ranks[i - 1]) ranks[i] = ranks[i - 1] - 1;
+        return ranks;
     }
 
     public static bool IsUrl(string s) =>

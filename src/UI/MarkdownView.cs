@@ -22,6 +22,8 @@ public sealed record MdContext
     public Action? ToggleDone { get; init; }
     /// <summary>With <see cref="ToggleDone"/>: the folded tasks are shown for now.</summary>
     public bool ShowDone { get; init; }
+    /// <summary>Text keeps to one line per paragraph or item, cut with "…" (a checklist that does not fit).</summary>
+    public bool NoWrap { get; init; }
 }
 
 /// <summary>Renders the Core.Markdown blocks into lightweight WPF elements (TextBlocks, no scrolling containers).</summary>
@@ -101,7 +103,8 @@ public static class MarkdownView
     {
         var tb = new TextBlock
         {
-            TextWrapping = TextWrapping.Wrap,
+            TextWrapping = cx.NoWrap ? TextWrapping.NoWrap : TextWrapping.Wrap,
+            TextTrimming = cx.NoWrap ? TextTrimming.CharacterEllipsis : TextTrimming.None,
             FontSize = size,
             FontWeight = weight ?? FontWeights.Normal,
             Foreground = fg ?? cx.Ink,

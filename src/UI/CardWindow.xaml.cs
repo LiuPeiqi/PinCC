@@ -57,6 +57,8 @@ public partial class CardWindow : Window
     public double AutoH { get; private set; } = 96;
     /// <summary>Set by layout when space ran out: shown as a pill without changing the stored state.</summary>
     public bool LayoutPill { get; set; }
+    /// <summary>A width (DIP) the user dragged out wider than the stored one: shown, never stored, dropped by <see cref="Settle"/>.</summary>
+    public double? Wide { get; set; }
     /// <summary>While completing/deleting: the in-place undo strip.</summary>
     public (string Text, Action Undo, Action Expire)? Strip { get; private set; }
     /// <summary>The card's full rect when the strip began: layout keeps it free until the strip expires.</summary>
@@ -103,6 +105,7 @@ public partial class CardWindow : Window
             EndAdd();
             if (_keepEditing) { _keepEditing = false; return; } // focus went to our own flyout
             if (Editing) EndEdit(returnFocus: false);
+            Settle();
         };
         PreviewMouseLeftButtonDown += OnDown;
         PreviewMouseMove += OnMove;
@@ -111,7 +114,7 @@ public partial class CardWindow : Window
         MouseDown += (_, e) => { if (e.ChangedButton == MouseButton.Middle && Card.ImageOnly) _desk.ZoomActual(this); };
         PreviewMouseWheel += OnWheel;
         PreviewKeyDown += OnKey;
-        Viewport.SizeChanged += (_, _) => CheckOverflow();
+        Scroller.ScrollChanged += (_, _) => CheckOverflow();
 
         Editor.TextChanged += (_, _) => { if (Editing) { _autosave.Stop(); _autosave.Start(); MeasureAuto(); } };
         Editor.PreviewKeyDown += OnEditorKey;
@@ -134,7 +137,22 @@ public partial class CardWindow : Window
         ShowActions();
         ApplyOpacity();
         if (Strip != null) { _stripTimer.Stop(); _stripTimer.Start(); } // expires 4 s after the pointer leaves
+        Settle();
         _desk.OnCardMouseLeave(this);
+    }
+
+    /// <summary>
+    /// Scrolling and a width dragged out are for now: they last while the card is pinned or active (or under the pointer,
+    /// which scrolls it). Otherwise the card returns to its first line and its stored width.
+    /// </summary>
+    void Settle()
+    {
+        if (Card.Topmost || IsActive) return;
+        Scroller.ScrollToTop();
+        if (Wide == null) return;
+        Wide = null;
+        Render();
+        _desk.Relayout(force: true);
     }
 
     // ================= geometry =================
@@ -152,7 +170,16 @@ public partial class CardWindow : Window
     /// <summary>The expanded size (DIP): fixed H, the image's aspect, or the measured content height.</summary>
     public Size Expanded => Card.ImageOnly
         ? new Size(Card.W, Card.H ?? Card.W / (_desk.ImageAspect(Card.Images[0]) ?? 1))
-        : new Size(Math.Max(Card.W, MinW), Math.Max(Card.H ?? AutoH, MinH));
+        : new Size(Math.Max(ShownW, MinW), Math.Max(Card.H ?? AutoH, MinH));
+
+    /// <summary>The width shown (DIP): one dragged out for now, or the stored one.</summary>
+    double ShownW => Wide ?? Card.W;
+
+    /// <summary>Width of the content column (DIP): the card minus its side padding and frame.</summary>
+    double ContentW => Math.Max(10, ShownW - 26);
+
+    /// <summary>Content height the card can show (DIP): its fixed height, or the fit-content cap, minus the padding and the row.</summary>
+    double Room => (Card.H ?? _desk.MaxAutoHeight(this)) - RowH - PadTop;
 
     /// <summary>Physical rect of the window (= the card).</summary>
     public Px Rect => Native.WindowRect(_hwnd);
@@ -239,7 +266,7 @@ public partial class CardWindow : Window
         };
     }
 
-    int DecodeWidth => (int)Math.Ceiling(Card.W * Native.WindowScale(_hwnd));
+    int DecodeWidth => (int)Math.Ceiling(ShownW * Native.WindowScale(_hwnd));
 
     void RenderContent()
     {
@@ -347,8 +374,15 @@ public partial class CardWindow : Window
             // Bounded: a huge paste is stored untouched but only its beginning is laid out.
             // Checked tasks fold away once there are a few of them (display only; the fold line opens them again).
             var noteCx = cx with { ShowDone = _showDone, ToggleDone = () => { _showDone = !_showDone; Render(); Dispatcher.BeginInvoke(() => _desk.Relayout(force: true), DispatcherPriority.Loaded); } };
-            MarkdownView.Render(body, note.Length > 12_000 ? note[..12_000] : note, noteCx, c.NoteLine);
+            var md = note.Length > 12_000 ? note[..12_000] : note;
+            MarkdownView.Render(body, md, noteCx, c.NoteLine);
             Stack.Children.Add(Spaced(body));
+            if (c.Progress.Total > 0)
+            {
+                // A checklist that does not fit keeps each item on one line (more of them in view); the wheel scrolls the rest.
+                Stack.Measure(new Size(ContentW, double.PositiveInfinity));
+                if (Stack.DesiredSize.Height > Room) MarkdownView.Render(body, md, noteCx with { NoWrap = true }, c.NoteLine);
+            }
         }
         else if (Stack.Children.Count == 0)
             Stack.Children.Add(new TextBlock { Text = "双击输入…", Foreground = cx.Muted, FontSize = _desk.FontSize });
@@ -373,8 +407,8 @@ public partial class CardWindow : Window
     FrameworkElement Pictures()
     {
         var c = Card;
-        double width = Math.Max(40, c.W - 26);
-        double room = (c.H ?? _desk.MaxAutoHeight(this)) - RowH - PadTop; // not the measured height: that depends on the picture
+        double width = Math.Max(40, ContentW);
+        double room = Room; // not the measured height: that depends on the picture
         if (c.Images.Count == 1)
             return Picture(0, width, Math.Max(40, Math.Min(room * 0.6, width)), Stretch.Uniform);
         double h = Math.Min(96, Math.Max(40, room / 3));
@@ -492,7 +526,7 @@ public partial class CardWindow : Window
         if (c.Topmost && !compact)
         {
             var pin = Chip("\uE840", c.Opacity < 0.99 ? $"{c.Opacity:P0}" : null, "取消置顶 · 在此滚动调透明度", () => _desk.TogglePin(this));
-            pin.PreviewMouseWheel += (_, e) => { e.Handled = true; AdjustOpacity(e.Delta); };
+            pin.Tag = "opacity"; // the wheel here sets the opacity (OnWheel)
             list.Add(pin);
         }
         if (c.RemindAt is long t)
@@ -571,7 +605,7 @@ public partial class CardWindow : Window
         {
             if (c.RemindAt == null) Actions.Children.Add(Action("\uE823", "提醒", () => Flyout.Reminder(_desk, this, Actions)));
             if (!c.Topmost) Actions.Children.Add(Action("\uE718", "置顶", () => _desk.TogglePin(this)));
-            if (c.W >= 200)
+            if (ShownW >= 200)
             {
                 Actions.Children.Add(Action("\uE790", "颜色", () => Flyout.Colors(_desk, this, Actions)));
                 Actions.Children.Add(Action("\uE70E", "折叠", () => _desk.ToggleCollapse(this)));
@@ -663,10 +697,9 @@ public partial class CardWindow : Window
     void MeasureAuto()
     {
         if (Card.H != null || Card.ImageOnly || Pill || Strip != null) return;
-        double contentW = Math.Max(10, Card.W - 26);
         double h;
-        if (Editing) { Editor.Measure(new Size(contentW, double.PositiveInfinity)); h = Editor.DesiredSize.Height; }
-        else { Stack.Measure(new Size(contentW, double.PositiveInfinity)); h = Stack.DesiredSize.Height + RowH; }
+        if (Editing) { Editor.Measure(new Size(ContentW, double.PositiveInfinity)); h = Editor.DesiredSize.Height; }
+        else { Stack.Measure(new Size(ContentW, double.PositiveInfinity)); h = Stack.DesiredSize.Height + RowH; }
         var nh = Math.Clamp(Math.Ceiling(PadTop + h + 3), MinH, _desk.MaxAutoHeight(this)); // +3: rounding at 125%/150% must not clip the last line
         if (Editing) nh = Math.Max(nh, AutoH);
         if (Math.Abs(nh - AutoH) < 1) return;
@@ -674,16 +707,21 @@ public partial class CardWindow : Window
         _desk.Resized(this);
     }
 
-    /// <summary>No scrollbars: taller content fades out at the bottom; ✨ offers a summary.</summary>
+    /// <summary>No scrollbars: content that does not fit scrolls with the wheel and fades out on each side with more; ✨ offers a summary.</summary>
     void CheckOverflow()
     {
-        if (Editing || Pill || Card.ImageOnly || Strip != null || Viewport.ActualHeight <= 0) return;
-        Stack.Measure(new Size(Math.Max(0, Viewport.ActualWidth), double.PositiveInfinity));
-        bool over = Stack.DesiredSize.Height > Viewport.ActualHeight + 2;
+        if (Editing || Pill || Card.ImageOnly || Strip != null || Scroller.ViewportHeight <= 0) return;
+        double more = Scroller.ScrollableHeight, at = Scroller.VerticalOffset, h = Scroller.ViewportHeight;
+        bool over = more > 2;
         if (over)
         {
-            double fade = Math.Min(36, Viewport.ActualHeight / 3) / Viewport.ActualHeight;
-            Viewport.OpacityMask = new LinearGradientBrush(new GradientStopCollection { new(Colors.Black, 0), new(Colors.Black, 1 - fade), new(Colors.Transparent, 1) }, 90);
+            double fade = Math.Min(36, h / 3) / h;
+            bool above = at > 1, below = at < more - 1;
+            Viewport.OpacityMask = new LinearGradientBrush(new GradientStopCollection
+            {
+                new(above ? Colors.Transparent : Colors.Black, 0), new(Colors.Black, above ? fade : 0),
+                new(Colors.Black, below ? 1 - fade : 1), new(below ? Colors.Transparent : Colors.Black, 1),
+            }, 90);
         }
         else Viewport.OpacityMask = null;
         if (over != _overflow)
@@ -1120,8 +1158,14 @@ public partial class CardWindow : Window
 
     void OnWheel(object sender, MouseWheelEventArgs e)
     {
-        if (Keyboard.Modifiers == ModifierKeys.Control) { e.Handled = true; AdjustOpacity(e.Delta); }
+        if (Keyboard.Modifiers == ModifierKeys.Control || Tagged(e.OriginalSource, "opacity") != null) { e.Handled = true; AdjustOpacity(e.Delta); }
         else if (Card.ImageOnly && !Pill && Keyboard.Modifiers == ModifierKeys.None) { e.Handled = true; _desk.Zoom(this, e.Delta > 0 ? 1.1 : 1 / 1.1); }
+        else if (!Editing)
+        {
+            // Anywhere on the card, three lines a notch (the editor scrolls itself).
+            e.Handled = true;
+            Scroller.ScrollToVerticalOffset(Scroller.VerticalOffset - e.Delta / 120.0 * 3 * Math.Round(FontSize * 1.5));
+        }
     }
 
     void OnKey(object sender, KeyEventArgs e)
@@ -1183,9 +1227,12 @@ public partial class CardWindow : Window
             case Native.WM_SIZING when Card.ImageOnly && !Pill:
                 KeepAspect(wParam.ToInt32(), lParam);
                 break;
+            case Native.WM_MOVING:
+                _desk.Dragging(this);
+                break;
             case Native.WM_EXITSIZEMOVE:
                 _inSizeMove = false;
-                if (Rect != _sizeMoveStart) _desk.OnUserMoved(this, _sizeMoveStart, _sizeMoveScale);
+                _desk.OnUserMoved(this, _sizeMoveStart, _sizeMoveScale);
                 break;
             case Native.WM_DPICHANGED when !_inSizeMove:
                 Dispatcher.BeginInvoke(() => _desk.Relayout(), DispatcherPriority.Loaded); // the monitor's scale changed under us
