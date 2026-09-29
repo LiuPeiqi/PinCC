@@ -14,5 +14,6 @@
     <Compile Include="../src/Core/**/*.cs" LinkBase="Core" />
     <Compile Include="../src/UI/Layout.cs;../src/UI/Native.cs" LinkBase="UI" />
     <None Include="../src/app.manifest" />
+    <EmbeddedResource Include="../builtin/**/*.json;../builtin/**/*.md" LogicalName="builtin/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

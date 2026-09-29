@@ -13,7 +13,7 @@ Program.Main ── 带参数 ─► Core.Cli（纯文本接口；不加载任�
                                  ├─ HubWindow  ×显示器数   “+” 与速拨
                                  ├─ ManageWindow           卡片库 + 设置
                                  └─ MessageWindow          隐藏顶层窗口：热键、显示器变化、时间变化、电源恢复
-Core：Db(winsqlite3) · Store(列级差量写 + rev + 操作组) · Card(派生状态) · When · Markdown · Fetch · Llm · Proc(Job)
+Core：Db(winsqlite3) · Store(列级差量写 + rev + 操作组) · Card(派生状态) · When · Markdown · Fetch · Llm · Agents(执行器) · Skills(技能管线) · Proc(Job)
 ```
 
 CLI 和 GUI 共用 `Store`，是同一个库的两个进程（WAL，busy_timeout）。GUI 每秒读一次 `PRAGMA data_version`；这个值只在**别的**连接提交后才会变化，一旦变化就全量重读（通常只有几十行）并比对差异。
@@ -103,11 +103,13 @@ settings(key, value)                       -- PRAGMA user_version = 1；遇到�
 ## 7. LLM 与抓取
 
 - **配置**（各项互相独立，改动立即生效）：`llm.where` = windows | wsl；`llm.tool` = 表中的工具、custom 或空（关闭）；`llm.distro` = WSL 发行版（空为默认）；`llm.model`；`llm.custom` = 自定义命令行（Windows 由 cmd.exe、WSL 由 `bash -c` 执行，放在同一个 timeout 之下）；`llm.env` = 从该发行版登录 shell 取得的 PATH/代理。Windows 工具每次按当前 PATH 查找，不存路径。首次启动自动检测一次（`llm.detected`），之后由设置页决定；设置页的“检测”只查所选环境（WSL 报错原样显示，例如发行版不存在）。
-- 一份工具表（claude、codex、gemini、qwen、llm、ollama），每个工具按模式给出**固定的参数数组**：
-  - text：只做总结，不开任何工具（claude：`--tools ""`）
-  - url：只允许 WebFetch/WebSearch，`--permission-mode dontAsk`，限制轮数
-  - file：只允许 Read，在文档所在文件夹里运行、提示词写明文件名；`--setting-sources user`，所以那个文件夹里的 `.claude` 设置和 hooks 不会被加载
-  - 自定义命令只支持 text 模式
+- **执行器是数据**（`agents/<名字>.json`；内置的 claude、codex、gemini、qwen、llm、ollama 在仓库 `builtin/agents/`，嵌入 exe；同名用户文件覆盖内置）。一份执行器给出：常量参数 `args`（`{model}`、`{grants}` 必须是完整的一项）、模型怎么传（`model`，`{value}`）、是否必须有模型、检测顺序 `priority`、列模型的参数，以及**授权对照表** `grants`：把抽象授权翻译成这个 CLI 自己的参数。
+  - `none`：只做文字处理，不开任何工具（claude：`--tools ""`）
+  - `web`：只允许 WebFetch/WebSearch，`--permission-mode dontAsk`，限制轮数
+  - `read`：只允许 Read，在文档所在文件夹里运行、提示词写明文件名；`--setting-sources user`，所以那个文件夹里的 `.claude` 设置和 hooks 不会被加载
+  - `shell:<命令前缀>`：只允许以该前缀开头的命令（claude：`Bash(<前缀>:*)`）；前缀只能含字母数字空格和 `. + / \ : = @ , ~ -`
+  - 一次运行需要几个授权就按顺序拼接各自的参数（claude 的 `--tools` 重复出现会累加，已实测）；执行器没有的授权 = 这个执行器不能跑需要它的技能。自定义命令只支持 none。
+  - 内置执行器的参数与原来写死的表逐项相同，所以行为没变（原有测试原样通过）。新 CLI = 新文件，不改代码。
 - **WSL**：`wsl.exe [-d <发行版>] --cd <文件夹|~> -e [/usr/bin/env PINCC_PATH=… 代理变量…] bash -lc <常量脚本> <工具> <参数…>`。bash 只看到一段常量脚本（`exec timeout -k 5 170 "$0" "$@"`），工具和参数作为 `$0 "$@"` 传入，所以路径里的引号、`$()`、反引号都只是普通字符。检测时读取用户登录 shell（包括 zsh）的环境，只保留 PATH、NVM_BIN、代理等白名单变量，运行时通过 `env` 传入；这样 nvm 装在 `~/.bashrc` 或 `~/.zshrc` 里的工具也能找到。
 - **进程调用**：
   - 提示词整段走标准输入，由后台任务写入后立即关闭；命令行参数里不包含任何用户内容
@@ -126,6 +128,24 @@ settings(key, value)                       -- PRAGMA user_version = 1；遇到�
   5. 仍然不够，让 LLM 在 url 模式下自己读
 - **隐私**：只有公网 http(s) 地址才会被**自动**读取：域名解析出的每个地址都必须是公网地址，不能带 `user:pass@`，参数名里不能有 token/key/secret/sig/code 之类。自动读取时每一次跳转都重新检查，公网链接跳到内网地址就停下，改为等用户点 ✨（用户主动要求时照常跟随跳转）。
 - **文件卡片**跟随文件：每 15 秒比较一次大小和修改时间，变了（或文件被删除）就重新读取，旧摘要标为过时。
+
+### 7.1 技能
+
+原则：代码只保留安全契约和执行管线；“什么时候、先取什么数据、允许模型做什么、结果写到哪里”都写在技能文件里。飞书、别的 CLI、别的 LLM 都不在代码里出现。
+
+- **格式**：`skills/<名字>/SKILL.md`，与 Claude 的技能格式相同：`---` 之间是元数据，正文是提示词。元数据每行 `键: 值`，值是普通字符串或一段 JSON（可以跨多行缩进；JSON 本身是合法 YAML），`#` 开头的行是注释，不认识的顶层键忽略（其他 agent 的 license 等字段可以共存）。解析失败的文件不生效，原因显示在设置页和 `PinCC skills`。
+  - `name`、`description` 必填；`label` 是菜单和 ✨ 上的短名
+  - `when`：`src`（通配符，匹配网址或文件路径）、`kind`、`ext`、`tag`、`scope`（card / desk）、`on`（ask = ✨ 和右键菜单；create = 新建或来源变化时自动；menu = 只进菜单）
+  - `context`：模型运行前 PinCC 自己执行的取数步骤，输出拼成 `{content}`：`{"run": [程序, 参数…], "where": runner|windows|wsl, "timeout": 秒}`，或内置读取 `{"builtin": "source" | "note" | "desk"}`
+  - `grants`（web、read、pincc、`shell:<前缀>`）、`runner`（偏好的执行器）、`output`（summary / append / cards / none）
+- **选哪个技能**：条件全部满足才算匹配；具体度 = src 4 + ext 3 + tag 2 + kind 1，同分时用户技能优先。✨ 和自动运行都交给具体度最高的那个，再看它的 `on` 是否允许。所以一个只允许 ask 的飞书技能，也会挡住内置摘要对飞书链接的自动运行（那只会读到登录页）。自动运行只对 output=summary 的技能生效，条件和内置摘要一样：没有摘要或摘要过时。卡片右键“技能 ›”列出所有匹配的技能；桌面技能在 + 的右键菜单里。
+- **内置摘要也是一个技能**（`builtin/skills/summary/SKILL.md`，正文就是默认模板）：它的取数步骤 `builtin: source` 就是原来的读取级联（HTTP → Edge 渲染 → 让模型用 web 自己读；文档：自己提取文字 → 让模型用 read 读）。原来的行为不变：链接和文档自动，笔记点 ✨，隐私守卫照旧。
+- **取数步骤**与模型用同一套进程规则：参数是独立的项；占位符 `{src} {file} {dir} {card} {title}` 替换后仍是一项；WSL 里经同一段常量脚本；Windows 的 .cmd 包装经 cmd.exe 时，含 `" % !` 或换行的参数拒绝，含空格或 `& | < > ^ ( )` 的加引号。退出码非 0 时技能失败，并显示那个程序自己的错误。
+- **环境变量契约**：每次运行（模型和取数步骤）都带 `PINCC_CARD`、`PINCC_SRC`、`PINCC_FILE`、`PINCC_DIR`、`PINCC_SKILL`、`PINCC_EXE`、`PINCC_HOME`（仅当设置了），有 pincc 授权时再带 `PINCC_GROUP`。名字必须以 `PINCC_` 开头，值不能含控制字符。WSL 里路径转成 `/mnt/…`，经 `/usr/bin/env` 参数传入，另设 `WSLENV=PINCC_GROUP:PINCC_HOME`，让模型在 WSL 里调用的 PinCC.exe 也能拿到。
+- **一次运行 = 一个操作组**：需要 pincc 授权时，先写一条标记记录（op=run，card_id=0）取得组号，作为 `PINCC_GROUP` 传给模型；命令行看到它、并且库里确实有这条标记时，本次写入并入该组。撤销这一组就撤销整次运行，标记记录恢复时什么也不做。已实测：WSL 里的 claude 调用 Windows 的 PinCC.exe，写入进了预留的组，`restore` 一次撤销。给模型的说明要求每条命令都以 PinCC 的完整路径开头，因为 claude 只放行这个前缀（实测：模型先读 help 后改用短名，就被拒了）。
+- **确认**：用户技能如果有 run 步骤或授权，在桌面上第一次运行前弹窗，列出将执行的命令、授权和文件位置。确认结果记为 `skill.ok.<名字>` = SKILL.md 的哈希，内容一改就要重新确认；没确认的技能不会自动运行。命令行 `PinCC run` 是用户亲自发起的，不再确认。
+- **运行记录**：数据目录 `runs.log`，一行一个 JSON（时间、技能、卡片、执行器、授权、耗时、结果），超过 1 MB 时只保留最后 500 行。
+- 文件改动几秒内自动重新读取；设置页“技能与执行器”列出生效的技能、执行器和错误，可以打开两个文件夹、重新加载、复制给其他 agent 用的 SKILL.md（同 `PinCC help --skill`）。示例：`docs/examples/skills/feishu-doc`（用 lark-cli 读飞书文档，在执行器所在的环境里运行，只在 ✨ 时运行）。
 
 ## 8. 热键
 

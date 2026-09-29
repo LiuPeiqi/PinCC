@@ -515,6 +515,7 @@ System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Inst
 Eq(Fetch.Text(System.Text.Encoding.GetEncoding(936).GetBytes("中文GBK")), "中文GBK", "gbk fallback");
 
 failed += FetchTests.Run();
+failed += SkillTests.Run();
 
 Console.WriteLine($"{passed} passed, {failed} failed");
 return failed == 0 ? 0 : 1;

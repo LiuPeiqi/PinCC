@@ -25,6 +25,8 @@ public static class Cli
         ["rm"] = ["json"],
         ["log"] = ["json"],
         ["restore"] = ["json"],
+        ["skills"] = ["json"],
+        ["run"] = ["json"],
     };
 
     public static int Run(string[] args, TextWriter o, Func<string> readStdin)
@@ -32,8 +34,8 @@ public static class Cli
         var verb = args.Length > 0 ? args[0].ToLowerInvariant() : "help";
         try
         {
-            if (verb is "help" or "--help" or "-h" or "/?") { o.WriteLine(Help); return Ok; }
-            if (!Options.TryGetValue(verb, out var allowed)) return Fail(o, UsageError, $"未知命令「{args[0]}」。可用：list show add set rm log restore help");
+            if (verb is "help" or "--help" or "-h" or "/?") { o.WriteLine(args.Skip(1).Contains("--skill") ? AgentSkill() : Help); return Ok; }
+            if (!Options.TryGetValue(verb, out var allowed)) return Fail(o, UsageError, $"未知命令「{args[0]}」。可用：list show add set rm log restore skills run help");
             var (pos, flags) = Split(args.Skip(1));
             if (flags.Keys.FirstOrDefault(k => !allowed.Contains(k)) is { } bad)
                 return Fail(o, UsageError, $"{verb} 不支持 --{bad}。可用选项：{string.Join(" ", allowed.Select(x => "--" + x))}");
@@ -47,11 +49,7 @@ public static class Cli
                     var cards = flags.ContainsKey("all") ? s.All() : s.Active();
                     cards.Sort(Card.Compare);
                     if (json) o.WriteLine(Json(cards.Select(c => Dto(c, s, mode))));
-                    else if (flags.ContainsKey("md"))
-                    {
-                        o.WriteLine($"# PinCC 卡片（{cards.Count} 张，{DateTime.Now:yyyy-MM-dd HH:mm}）");
-                        foreach (var c in cards) o.WriteLine("\n" + Md(c, s));
-                    }
+                    else if (flags.ContainsKey("md")) o.WriteLine(DeskMarkdown(s, cards));
                     else if (cards.Count == 0) o.WriteLine("（没有卡片）");
                     else foreach (var c in cards) o.WriteLine(Line(c));
                     return Ok;
@@ -69,7 +67,7 @@ public static class Cli
                     var change = Changes(s, flags, readStdin, null);
                     var c = new Card { Body = body };
                     change(c);
-                    c = s.Insert(s.Begin(), c); // fully populated: one row, one journal entry
+                    c = s.Insert(Begin(s), c); // fully populated: one row, one journal entry
                     o.WriteLine(json ? Json(Dto(c, s, mode)) : $"已添加 #{c.Id}");
                     return Ok;
                 }
@@ -80,7 +78,7 @@ public static class Cli
                     long? ifRev = flags.TryGetValue("if-rev", out var r) ? long.Parse(r, CultureInfo.InvariantCulture) : null;
                     var ifInput = flags.GetValueOrDefault("if-input");
                     var change = Changes(s, flags, readStdin, text);
-                    var g = s.Begin();
+                    var g = Begin(s);
                     c = s.Mutate(g, c.Id, x =>
                     {
                         // Checked inside the write transaction: the input cannot change between this check and the write.
@@ -93,7 +91,7 @@ public static class Cli
                 case "rm":
                 {
                     var c = Need(s, pos);
-                    var g = s.Begin();
+                    var g = Begin(s);
                     c = s.Mutate(g, c.Id, x => x.DeletedAt ??= When.NowMs, "delete") ?? throw new KeyNotFoundException($"找不到卡片 #{c.Id}");
                     if (json) o.WriteLine(Json(Dto(c, s, mode)));
                     else if (g.Empty) o.WriteLine($"#{c.Id} 已经是删除状态（{When.Format(When.FromMs(c.DeletedAt!.Value), DateTime.Now)} 删除），未改动");
@@ -105,6 +103,80 @@ public static class Cli
                     var ops = s.Ops(pos.Count > 0 ? int.Parse(pos[0], CultureInfo.InvariantCulture) : 30);
                     if (json) o.WriteLine(Json(ops.Select(p => new { grp = p.Grp, op_id = p.Id, at = Iso(p.At), card = p.CardId, op = p.Name })));
                     else foreach (var p in ops) o.WriteLine($"{p.Grp,6}  {When.FromMs(p.At):MM-dd HH:mm:ss}  #{p.CardId,-5} {OpName(p.Name)}");
+                    return Ok;
+                }
+                case "skills":
+                {
+                    Skills.Refresh(s.Home);
+                    Runners.Refresh(s.Home);
+                    if (json)
+                    {
+                        o.WriteLine(Json(new
+                        {
+                            skills = Skills.All.Select(k => new
+                            {
+                                name = k.Name, label = k.Label, description = k.Description, origin = k.Builtin ? "builtin" : k.Origin, scope = k.Scope, on = k.On,
+                                src = k.Src, kind = k.Kinds, ext = k.Exts, tag = k.Tag, grants = k.Grants, runner = k.Runner, output = k.Output,
+                                context = k.Context.Select(x => x.Run != null ? (object)new { run = x.Run, where = x.Where, timeout = x.Timeout } : new { builtin = x.Builtin }),
+                                approved = !k.NeedsApproval || s.Setting("skill.ok." + k.Name) == k.Hash,
+                            }),
+                            runners = Runners.All.Select(p => new { name = p.Name, label = p.Display, origin = p.Origin, command = p.Program, grants = (p.Grants ?? new()).Keys }),
+                            errors = Skills.Errors.Concat(Runners.Errors),
+                        }));
+                        return Ok;
+                    }
+                    o.WriteLine($"技能（{Skills.Dir(s.Home)}）：");
+                    foreach (var k in Skills.All)
+                    {
+                        var when = string.Join(" ", new[] { k.Scope == "desk" ? "桌面" : null, k.Src.Count > 0 ? "src=" + string.Join(",", k.Src) : null, k.Kinds.Count > 0 ? "kind=" + string.Join(",", k.Kinds) : null,
+                            k.Exts.Count > 0 ? "ext=" + string.Join(",", k.Exts) : null, k.Tag != null ? "#" + k.Tag : null }.OfType<string>());
+                        var state = k.NeedsApproval ? s.Setting("skill.ok." + k.Name) == k.Hash ? " · 已确认" : " · 待确认（桌面上第一次运行时）" : "";
+                        o.WriteLine($"  {k.Name,-16} {k.Label}（{(k.Builtin ? "内置" : "用户")}）· {string.Join("/", k.On)}{(when.Length > 0 ? " · " + when : "")} · 输出 {k.Output}"
+                            + (k.Grants.Count > 0 ? " · 授权 " + string.Join(",", k.Grants) : "") + (k.Runner != null ? " · 执行器 " + k.Runner : "") + state);
+                    }
+                    o.WriteLine($"执行器（{Runners.Dir(s.Home)}）：");
+                    foreach (var p in Runners.All) o.WriteLine($"  {p.Name,-16} {p.Display}（{(p.Origin == "内置" ? "内置" : "用户")}）· 授权 {string.Join(",", new[] { "none" }.Concat((p.Grants ?? new()).Keys).Distinct())}");
+                    foreach (var e in Skills.Errors.Concat(Runners.Errors)) o.WriteLine("  ✗ " + e);
+                    return Ok;
+                }
+                case "run":
+                {
+                    if (pos.Count == 0) throw new ArgumentException("run 需要技能名：PinCC run <技能> [卡片编号]（PinCC skills 列出全部）");
+                    Skills.Refresh(s.Home);
+                    Runners.Refresh(s.Home);
+                    var skill = Skills.Find(pos[0]) ?? throw new KeyNotFoundException($"找不到技能「{pos[0]}」（PinCC skills 列出全部）");
+                    var card = skill.Scope == "card" ? Need(s, pos.Skip(1).ToList()) : null;
+                    var llm = Llm.FromSettings(s, skill.Runner) ?? throw new InvalidOperationException("没有可用的执行器：" + Llm.Problem(s, skill.Runner));
+                    var g = Begin(s);
+                    if (skill.Grants.Contains("pincc")) s.Reserve(g);
+                    SkillResult res;
+                    try
+                    {
+                        res = SkillRun.Run(new SkillRequest
+                        {
+                            Skill = skill, Llm = llm, Store = s, Card = card, Desk = skill.Scope == "desk" ? DeskMarkdown(s, s.Active()) : null,
+                            Template = skill.Name == "summary" && skill.Builtin ? s.Setting("llm.prompt") : null, Group = skill.Grants.Contains("pincc") ? g.Number : null,
+                        }).GetAwaiter().GetResult()!;
+                    }
+                    catch (Exception e) when (e is InvalidOperationException or TimeoutException or IOException)
+                    {
+                        s.Release(g);
+                        o.WriteLine($"错误：技能 {skill.Name} 失败：" + e.Message); // the run failed, the command was fine: no usage hint
+                        return UsageError;
+                    }
+                    var (_, ok) = SkillRun.Apply(s, g, skill, res, card?.Id);
+                    s.Release(g);
+                    if (json) { o.WriteLine(Json(new { skill = skill.Name, card = card?.Id, output = skill.Output, written = ok, grp = g.Empty ? (long?)null : g.Number, result = res.Text })); return Ok; }
+                    o.WriteLine(res.Text);
+                    o.WriteLine();
+                    o.WriteLine(skill.Output switch
+                    {
+                        "summary" or "append" when !ok => "（卡片在运行期间改动了，结果未写入）",
+                        "summary" => $"已写入 #{card!.Id} 的摘要（撤销：PinCC restore {g.Number}）",
+                        "append" => $"已追加到 #{card!.Id}（撤销：PinCC restore {g.Number}）",
+                        "cards" when ok => $"已新建卡片（撤销：PinCC restore {g.Number}）",
+                        _ => g.Empty ? "（没有写入）" : $"本次运行的写入可一起撤销：PinCC restore {g.Number}",
+                    });
                     return Ok;
                 }
                 default: // restore
@@ -125,6 +197,21 @@ public static class Cli
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException) { return Fail(o, UsageError, e.Message); }
         catch (InvalidOperationException e) when (e.Message.Contains("(5)") || e.Message.Contains("(6)")) { return Fail(o, Busy, "数据库正忙，请稍后重试"); }
         catch (InvalidOperationException e) { return Fail(o, UsageError, e.Message); }
+    }
+
+    /// <summary>
+    /// A command's undo group: its own, or — when a skill run started this process (PINCC_GROUP names a reserved run) —
+    /// the run's, so everything the model wrote is undone together.
+    /// </summary>
+    static Group Begin(Store s) =>
+        Environment.GetEnvironmentVariable("PINCC_GROUP") is { Length: > 0 } v && long.TryParse(v, out var n) && s.Join(n) is { } g ? g : s.Begin();
+
+    /// <summary>The desk as one markdown document (list --md; what a desk skill reads).</summary>
+    public static string DeskMarkdown(Store s, List<Card> cards)
+    {
+        var sb = new StringBuilder($"# PinCC 卡片（{cards.Count} 张，{DateTime.Now:yyyy-MM-dd HH:mm}）\n");
+        foreach (var c in cards) sb.Append('\n').Append(Md(c, s)).Append('\n');
+        return sb.ToString().TrimEnd();
     }
 
     /// <summary>--if-input no longer matches: the note or page changed since the caller read it.</summary>
@@ -331,11 +418,34 @@ public static class Cli
     static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     static string Json(object v) => JsonSerializer.Serialize(v, JsonOpts);
 
+    /// <summary>A SKILL.md that teaches any agent to use this CLI (help --skill): drop it into the agent's skills folder.</summary>
+    public static string AgentSkill()
+    {
+        var exe = Environment.ProcessPath ?? "PinCC.exe";
+        return $"""
+            ---
+            name: pincc
+            description: 用 PinCC（Pin Carbon Copy，Windows 桌面悬浮卡片）读写用户的待办卡片：钉住文件/网址/笔记、加清单项、写摘要、设提醒。用户说“钉起来 / pin 一下 / 记到卡片 / 桌面待办”时使用。
+            ---
+            PinCC 的命令行就是它的接口，桌面程序会在 1 秒内反映改动。
+
+            - 程序：`{exe}`（WSL 里：`{Llm.WslPath(exe)}`；加入 PATH 后可直接用 `PinCC.exe`）
+            - 先运行 `PinCC.exe help` 看完整用法。常用：
+              - `PinCC.exe list --md`：读全部卡片
+              - `PinCC.exe add "<网址或文件路径>" `：钉一个网址/文档（摘要由 PinCC 自己生成，不要手写）
+              - `PinCC.exe add - --remind "明天 9点" < note.md`：新建带提醒的笔记
+              - `PinCC.exe set <id> --add-task "…"`、`--check N`：清单逐项修改
+              - `PinCC.exe show <id> --json`，再 `set <id> --summary - --if-input <input_hash>`：写摘要
+            - 从 WSL 调用时文件路径给 Windows 路径（`wslpath -w`）。
+            - 未经用户要求不要 `rm` 或 `--done`；每次写入都可以 `PinCC.exe log` 找到组号后 `restore` 撤销。
+            """;
+    }
+
     public static string OpName(string op) => op switch
     {
         "create" => "新建", "edit" => "编辑", "done" => "完成", "delete" => "删除", "restore" => "恢复", "remind" => "提醒",
         "summary" => "摘要", "meta" => "读取来源", "move" => "移动", "resize" => "调整大小", "view" => "显示设置", "color" => "颜色",
-        "tile" => "平铺", _ => op,
+        "tile" => "平铺", "run" => "运行技能", _ => op,
     };
 
     public const string Help = """
@@ -351,7 +461,9 @@ public static class Cli
         PinCC rm <id> [--json]                  删除（可恢复）
         PinCC log [N] [--json]                  最近的操作（第一列为操作组编号）
         PinCC restore <组编号> [--json]          撤销整组操作：该组改过的内容回到之前，其他改动不受影响
-        PinCC help                              本说明
+        PinCC skills [--json]                   列出技能（数据目录 skills\<名字>\SKILL.md）和执行器（agents\<名字>.json）
+        PinCC run <技能> [<id>] [--json]         运行一个技能（桌面范围的技能不需要 id），按技能的 output 写回
+        PinCC help [--skill]                    本说明；--skill 输出一份教 agent 使用 PinCC 的 SKILL.md
 
         选项：--summary <文字|->  --remind <时间|off>  --done | --undone  --color <0-8|auto>  --top | --normal  --image <图片文件>  --json
               --add-task <文字|->  加任务：每行一项，加在最后一个任务之后（没有任务时加在末尾），不用改写整段正文
@@ -368,6 +480,7 @@ public static class Cli
         - 新建：PinCC add - --remind "明天 9点" < note.md
         - 清单：PinCC set <id> --add-task "买牛奶"；PinCC set <id> --check 2（只改那一行，不会覆盖别处的改动）
         - 未经用户要求不要 rm 或 --done；每次写入都可以用 log / restore 撤销。
+        - 由 PinCC 技能启动时（环境变量 PINCC_GROUP 已设置），你的所有写入归入同一个操作组，可一起撤销。
         - 从 WSL 调用 PinCC.exe（经 Windows 路径），不要直接打开 pincc.db。
 
         在 cmd / PowerShell 里手动运行：PinCC.exe 是窗口程序，控制台不会等它结束（输出会和提示符混在一起），

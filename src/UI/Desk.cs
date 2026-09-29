@@ -26,6 +26,7 @@ public sealed class Desk
     readonly Dictionary<string, (int W, int H)?> _sizes = new();
     readonly List<long> _undo = new();
     readonly HashSet<long> _summarizing = new();
+    int _ticks;
     readonly HashSet<CardWindow> _reenrich = new();
     readonly HashSet<CardWindow> _overflowHidden = new();
     readonly HashSet<(long Id, long At)> _rung = new();
@@ -168,8 +169,8 @@ public sealed class Desk
     void CatchUpSummaries()
     {
         if (Llm == null) return;
-        foreach (var w in _cards.Values.Where(w => w.Ref > 0 && w.Busy == null && w.Card.SrcInfo is { State: null } && string.IsNullOrWhiteSpace(w.Card.Summary) && AutoSummarizes(w.Card)).ToList())
-            Summarize(w, userAsked: false);
+        foreach (var w in _cards.Values.Where(w => w.Ref > 0 && w.Busy == null && w.Card.SrcInfo is { State: null } && string.IsNullOrWhiteSpace(w.Card.Summary)).ToList())
+            AutoRun(w);
     }
 
     public static bool AutoStart
@@ -478,6 +479,7 @@ public sealed class Desk
         w.Render();
         Relayout(force: true);
         MaybeEnrich(w);
+        if (w.Card.Src == null && _cards.ContainsValue(w)) AutoRun(w); // a user skill for notes that runs by itself (e.g. by #tag)
     }
 
     public void ToggleTask(CardWindow w, int line) => Change(w, c => c.Body = Markdown.ToggleTask(c.Body, line), "edit");
@@ -964,6 +966,8 @@ public sealed class Desk
     void Tick()
     {
         Poll();
+        // Skill and runner files are read again when they change (every few seconds is plenty); ✨ labels follow.
+        if (++_ticks % 5 == 0 && (Skills.Refresh() | Runners.Refresh())) foreach (var w in _cards.Values) w.Render();
 
         // Every reminder rings once when due, however it got there (picker, snooze, CLI, a time already past).
         var due = _cards.Values.Where(w => w.Card.Overdue && w.Strip == null && !_rung.Contains((w.Card.Id, w.Card.RemindAt!.Value))).ToList();
@@ -1077,7 +1081,7 @@ public sealed class Desk
     }
 
     /// <summary>Reads a card's source (web page or file) into its metadata, then summarizes it when that is automatic.</summary>
-    public async Task Enrich(CardWindow w, bool userAsked = false)
+    public async Task Enrich(CardWindow w, bool userAsked = false, Skill? then = null)
     {
         if (w.Busy != null) { _reenrich.Add(w); return; } // busy with the old source: run again when it finishes
         var c = w.Card;
@@ -1147,8 +1151,8 @@ public sealed class Desk
         // A summary of a different source must show as stale (never as current); same source keeps its bookkeeping.
         meta.SumHash = prev?.Src == src ? prev.SumHash : string.IsNullOrWhiteSpace(w.Card.Summary) ? null : "source-changed";
         SaveMeta(w, meta);
-        bool needs = w.Card.SummaryStale || string.IsNullOrWhiteSpace(w.Card.Summary);
-        if (needs && Llm != null && (userAsked || AutoSummarizes(w.Card))) Summarize(w, page, userAsked);
+        if (then != null && Llm != null) RunSkill(w, then, page, userAsked);
+        else if (AutoRuns(w.Card) && (w.Card.SummaryStale || string.IsNullOrWhiteSpace(w.Card.Summary))) AutoRun(w, page);
         else if (_reenrich.Remove(w)) MaybeEnrich(w);
     }
 
@@ -1186,86 +1190,81 @@ public sealed class Desk
         return (int)Math.Clamp(lines * perLine * 0.7, 60, 500);    // bullets and wrapping waste about 30%
     }
 
+    // ================= skills =================
+
+    /// <summary>The skill ✨ runs on this card (the most specific match that allows "ask"), or null.</summary>
+    public Skill? AskSkill(Card c) => Skills.Best(c) is { } s && s.On.Contains("ask") ? s : null;
+
     /// <summary>
-    /// Summarizes the note, page or document with the configured CLI LLM (one run per card at a time). The result is
-    /// stored only if the card still has the same source and input when it arrives; otherwise it is dropped as stale.
-    /// Only a summary the user asked for becomes an undo step.
+    /// Whether this card's skill runs by itself (so ✨ need not be offered): the built-in summary on readable public
+    /// sources (llm.auto, privacy guard), or a user skill that allows "create", writes a summary and was approved.
     /// </summary>
-    public async void Summarize(CardWindow w, Page? page = null, bool userAsked = true)
+    public bool AutoRuns(Card c) => Llm != null && Skills.Best(c) is { } s && s.On.Contains("create") && s.Output == "summary"
+        && (s.Builtin ? AutoSummarizes(c) : Approved(s));
+
+    bool Approved(Skill s) => !s.NeedsApproval || Store.Setting("skill.ok." + s.Name) == s.Hash;
+
+    /// <summary>✨ (or 重试 after a failed run) on a card: its skill, asked for — also one that otherwise only runs by itself.</summary>
+    public void Ask(CardWindow w)
+    {
+        Skills.Refresh();
+        if ((AskSkill(w.Card) ?? Skills.Best(w.Card)) is { } skill) RunSkill(w, skill);
+    }
+
+    /// <summary>After a source was read, or a note saved: the card's skill if it runs by itself and has no fresh result.</summary>
+    void AutoRun(CardWindow w, Page? page = null)
+    {
+        var c = w.Card;
+        if (!AutoRuns(c) || !(c.SummaryStale || string.IsNullOrWhiteSpace(c.Summary))) return;
+        RunSkill(w, Skills.Best(c)!, page, userAsked: false);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="skill"/> on a card with the configured runner (one run per card at a time): gather its
+    /// context, ask the model, write the result where the skill says. A result for a card whose source or input changed
+    /// meanwhile is dropped. Only runs the user asked for (or that let the model write through the CLI) become undo steps.
+    /// </summary>
+    public async void RunSkill(CardWindow w, Skill skill, Page? page = null, bool userAsked = true)
     {
         if (Llm is not { } llm) { if (userAsked) Notify("没有可用的 CLI LLM：在“管理 › 设置 › AI 摘要”中选择"); return; }
         if (w.Ref < 0) return;
         var c = w.Card;
-        if (c.Src != null && (c.SrcInfo == null || c.SrcInfo.State == "manual"))
+        if (skill.Reads("source") && c.Src != null && (c.SrcInfo == null || c.SrcInfo.State == "manual"))
         {
-            await Enrich(w, userAsked: true); // read the source first; Enrich continues with the summary
+            await Enrich(w, userAsked: true, then: skill); // read the source first; Enrich continues with this skill
             return;
         }
+        if (!Approved(skill) && !(userAsked && Confirm(skill, w))) return;
         var id = w.Ref;
         if (!_summarizing.Add(id)) return;
+        bool summary = skill.Builtin && skill.Name == "summary";
         w.Problem = null;
+        w.Busy = summary ? "✨ 摘要中…" : $"✨ {skill.Label}…";
+        w.Render();
+        var g = Store.Begin();
         try
         {
-            var src = c.Src;
-            var hash = c.InputHash;
-            string what = "笔记", content = c.Body, title = c.Title, source = src ?? "";
-            var mode = LlmMode.Text;
-            string? cwd = null;
-            if (c.IsLink)
+            if (skill.Grants.Contains("pincc")) Store.Reserve(g);
+            var res = await SkillRun.Run(new SkillRequest
             {
-                what = "网页";
-                if (page == null)
-                {
-                    try { page = await Fetch.Web(src!, auto: !userAsked); } catch { page = null; } // unreachable now: still try the URL mode below
-                }
-                if (page is { Thin: false }) content = page.Text;
-                else if (page?.Download is { } doc && llm.Supports(LlmMode.File))
-                {
-                    what = "文档";
-                    mode = LlmMode.File;
-                    cwd = Path.GetDirectoryName(doc);
-                    content = "请先读取当前目录中的文件「" + Path.GetFileName(doc) + "」，再按要求总结。";
-                }
-                else if (llm.Supports(LlmMode.Url)) { mode = LlmMode.Url; content = $"正文无法直接获取，请先访问这个网址再总结：{src}\n{c.SrcInfo?.Desc}"; }
-                else content = $"{c.SrcInfo?.Title}\n{c.SrcInfo?.Desc}".Trim();
-                if (!string.IsNullOrWhiteSpace(c.Note)) content += "\n\n（卡片上的备注：" + c.Note.Trim() + "）";
-            }
-            else if (c.IsFile)
-            {
-                what = "文档";
-                var (_, text) = await Task.Run(() => Fetch.File(src!));
-                if (text.Length > 0) content = text;
-                else if (llm.Supports(LlmMode.File) && File.Exists(src))
-                {
-                    mode = LlmMode.File;
-                    cwd = Path.GetDirectoryName(src);
-                    content = "请先读取当前目录中的文件「" + Path.GetFileName(src) + "」，再按要求总结。";
-                }
-                else if (userAsked) throw new InvalidOperationException("这种文件需要能读文件的 CLI（例如 claude）");
-                else return;
-            }
-            w.Busy = "✨ 摘要中…";
-            w.Render();
-            var result = await llm.Ask(Llm.Prompt(what, title, source, content, Budget(w), Store.Setting("llm.prompt")), mode, cwd);
-            if (!_cards.TryGetValue(id, out var live)) return;
-            var g = Store.Begin();
-            var r = Store.Mutate(g, id, x =>
-            {
-                if (x.Src != src || x.InputHash != hash) return; // the card changed meanwhile: this summary is stale, drop it
-                x.Summary = result;
-                var meta = x.Info ?? new CardMeta { Src = x.Src };
-                meta.SumHash = hash;
-                x.Meta = meta.ToJson();
-            }, "summary");
-            if (userAsked) Push(g);
-            if (r != null) live.Update(r);
+                Skill = skill, Llm = llm, Store = Store, Card = c, Budget = Budget(w), Page = page, UserAsked = userAsked,
+                Template = summary ? Store.Setting("llm.prompt") : null, Group = g.Empty ? null : g.Number,
+            });
+            if (res == null || !_cards.TryGetValue(id, out var live)) return;
+            var (r, _) = SkillRun.Apply(Store, g, skill, res, id, (body, grp) => NewCard(ScreenOf(live), body, edit: false, group: grp).Card);
+            Store.Release(g); // a run that wrote nothing leaves no undo step
+            if (userAsked || skill.Grants.Contains("pincc")) Push(g);
+            if (r != null && r.Id == id) live.Update(r);
+            if (skill.Output == "none") Notify($"「{skill.Label}」：" + FirstLine(res.Text));
+            if (skill.Output is "append" or "cards") Relayout(force: true);
         }
         catch (Exception e)
         {
-            w.Problem = "摘要失败：" + (e.Message.Length > 120 ? e.Message[..120] + "…" : e.Message);
+            w.Problem = (summary ? "摘要" : skill.Label) + "失败：" + (e.Message.Length > 120 ? e.Message[..120] + "…" : e.Message);
         }
         finally
         {
+            Store.Release(g);
             _summarizing.Remove(id);
             w.Busy = null;
             if (_cards.ContainsValue(w))
@@ -1275,6 +1274,55 @@ public sealed class Desk
             }
         }
     }
+
+    /// <summary>A desk skill (menu of +): reads the whole desk; its cards land on <paramref name="s"/>. One undo step.</summary>
+    public async void RunDeskSkill(Skill skill, Screen s)
+    {
+        if (Llm is not { } llm) { Notify("没有可用的 CLI LLM：在“管理 › 设置 › AI 摘要”中选择"); return; }
+        if (!Approved(skill) && !Confirm(skill, null)) return;
+        Notify($"正在运行「{skill.Label}」…");
+        var g = Store.Begin();
+        try
+        {
+            if (skill.Grants.Contains("pincc")) Store.Reserve(g);
+            var res = await SkillRun.Run(new SkillRequest
+            {
+                Skill = skill, Llm = llm, Store = Store, Desk = Cli.DeskMarkdown(Store, Store.Active()), Group = g.Empty ? null : g.Number,
+            });
+            if (res == null) return;
+            var (_, written) = SkillRun.Apply(Store, g, skill, res, null, (body, grp) => NewCard(s, body, edit: false, group: grp).Card);
+            Store.Release(g);
+            Push(g);
+            Notify(written ? $"「{skill.Label}」完成" : $"「{skill.Label}」：" + FirstLine(res.Text));
+            Relayout(force: true);
+        }
+        catch (Exception e) { Notify($"「{skill.Label}」失败：" + (e.Message.Length > 120 ? e.Message[..120] + "…" : e.Message)); }
+        finally { Store.Release(g); }
+    }
+
+    static string FirstLine(string text) => text.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) is { } l ? (l.Length > 80 ? l[..80] + "…" : l) : "";
+
+    /// <summary>
+    /// A user skill that runs programs or lets the model act is shown to the user once — what it runs, what it may do —
+    /// and remembered by its content hash (any edit asks again).
+    /// </summary>
+    bool Confirm(Skill skill, Window? owner)
+    {
+        var text = $"技能「{skill.Label}」（{skill.Name}）第一次运行，请确认：\n\n{skill.Description}\n"
+            + (SkillRun.Describe(skill) is { Length: > 0 } steps ? "\n先由 PinCC 执行：\n" + steps : "")
+            + (skill.Grants.Count > 0 ? $"\n允许模型自己：{string.Join("、", skill.Grants.Select(GrantText))}\n" : "")
+            + $"\n执行器：{skill.Runner ?? Llm?.Tool}\n文件：{Path.Combine(skill.Origin, "SKILL.md")}\n\nSKILL.md 改动后会再次确认。";
+        var ok = (owner != null ? MessageBox.Show(owner, text, "PinCC · 运行技能", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No)
+            : MessageBox.Show(text, "PinCC · 运行技能", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No)) == MessageBoxResult.Yes;
+        if (ok) Store.SetSetting("skill.ok." + skill.Name, skill.Hash);
+        return ok;
+    }
+
+    static string GrantText(string g) => g switch
+    {
+        "web" => "上网读取网页", "read" => "读取文档所在文件夹里的文件", "pincc" => "调用 PinCC 命令行读写卡片",
+        _ when g.StartsWith("shell:") => $"运行以「{g[6..]}」开头的命令", _ => g,
+    };
 
     public void ClearSummary(CardWindow w) => Change(w, c => c.Summary = null, "summary");
 
@@ -1314,9 +1362,22 @@ public sealed class Desk
 
     public ContextMenu CardMenu(CardWindow w)
     {
+        Skills.Refresh(); // a skill file saved a moment ago is in the menu already
         var c = w.Card;
         var m = new ContextMenu();
-        if (Llm != null && !c.ImageOnly) Add(m, "", string.IsNullOrWhiteSpace(c.Summary) ? "摘要" : "重新摘要", () => Summarize(w));
+        if (Llm != null && !c.ImageOnly && AskSkill(c) is { } ask)
+            Add(m, "", ask.Builtin && ask.Name == "summary" ? string.IsNullOrWhiteSpace(c.Summary) ? "摘要" : "重新摘要" : ask.Label, () => Ask(w));
+        if (Llm != null && Skills.For(c).Where(k => k != AskSkill(c)).ToList() is { Count: > 0 } more)
+        {
+            var sub = new MenuItem { Header = "技能", Icon = "" };
+            foreach (var k in more)
+            {
+                var item = new MenuItem { Header = k.Label, ToolTip = k.Description };
+                item.Click += (_, _) => RunSkill(w, k);
+                sub.Items.Add(item);
+            }
+            m.Items.Add(sub);
+        }
         if (!string.IsNullOrWhiteSpace(c.Summary)) Add(m, "", "清除摘要", () => ClearSummary(w));
         if (c.Src != null) Add(m, "", c.IsLink ? "复制链接" : "复制路径", () => { try { Clipboard.SetText(c.Src!); w.ShowBadge("已复制"); } catch { } });
         if (c.IsFile) Add(m, "", "打开所在位置", () => Reveal(c.Src!));
@@ -1348,6 +1409,7 @@ public sealed class Desk
 
     public ContextMenu HubMenu(Screen s)
     {
+        Skills.Refresh();
         string G(string key) => Store.Setting(key, Hotkeys.Actions.First(a => a.Key == key).Default);
         var m = new ContextMenu();
         if (HotkeyProblem) Add(m, "", "快捷键冲突 · 去设置", () => OpenManage("settings"));
@@ -1368,6 +1430,17 @@ public sealed class Desk
             colors.Items.Add(item);
         }
         m.Items.Add(colors);
+        if (Llm != null && Skills.ForDesk() is { Count: > 0 } desk)
+        {
+            var sub = new MenuItem { Header = "技能", Icon = "" };
+            foreach (var k in desk)
+            {
+                var item = new MenuItem { Header = k.Label, ToolTip = k.Description };
+                item.Click += (_, _) => RunDeskSkill(k, s);
+                sub.Items.Add(item);
+            }
+            m.Items.Add(sub);
+        }
         m.Items.Add(new Separator());
         Add(m, "", "撤销", Undo, "Ctrl+Z");
         Add(m, "", "管理…", () => OpenManage());
@@ -1507,7 +1580,7 @@ public sealed class Desk
             host.SetResourceReference(Border.BackgroundProperty, "Ui.Bg");
             host.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "Ui.Ink");
             Try("manage-cards", () => host, m.Width);
-            Try("manage-settings", () => { m.Select("settings"); return host; }, m.Width);
+            Try("manage-settings", () => { m.Select("settings"); return host; }, m.Width, 1900); // the whole page, not one screenful
             m.Close();
         }
         // A desk without cards (render-only run) uses a sample card that is never shown.
@@ -1526,19 +1599,30 @@ public sealed class Desk
         SampleCard("checklist-adding", "## 周末\n- [ ] 洗车", w => w.StartAdd());
         SampleCard("checklist-pill", list, w => { w.Card.Collapsed = true; w.Render(); });
         SampleCard("checklist-pill-bare", "- [x] 洗车\n- [ ] 买菜", w => { w.Card.Collapsed = true; w.Render(); });
+        // A picture card's action bar on a bright, busy picture (an overdue card shows its row without hover).
+        var bright = new System.Windows.Media.DrawingVisual();
+        using (var dc = bright.RenderOpen())
+        {
+            dc.DrawRectangle(new System.Windows.Media.LinearGradientBrush(System.Windows.Media.Colors.White, System.Windows.Media.Colors.Gold, 0), null, new Rect(0, 0, 320, 200));
+            for (int i = 0; i < 8; i++) dc.DrawRectangle(System.Windows.Media.Brushes.SkyBlue, null, new Rect(i * 40, 150 + i % 3 * 12, 22, 50));
+        }
+        var shot = new RenderTargetBitmap(320, 200, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+        shot.Render(bright);
+        var picture = Store.SaveImage(ClipData.Png(shot));
+        SampleCard("picture-bar", "", card: new Card { Images = [picture], W = 320, H = 200, RemindAt = When.NowMs - 60_000 });
         File.WriteAllText(Path.Combine(dir, "ui-errors.txt"), string.Join("\n\n", errors));
 
-        void SampleCard(string name, string body, Action<CardWindow>? setup = null, bool unfold = false)
+        void SampleCard(string name, string body, Action<CardWindow>? setup = null, bool unfold = false, Card? card = null)
         {
-            var w = new CardWindow(this, new Card { Body = body, W = 260 });
+            var w = new CardWindow(this, card ?? new Card { Body = body, W = 260 });
             try
             {
                 setup?.Invoke(w);
                 if (unfold && FindFold(w.Content as DependencyObject) is { } fold)
                     fold.RaiseEvent(new System.Windows.Input.MouseButtonEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 0, System.Windows.Input.MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent });
                 var e = (FrameworkElement)w.Content;
-                e.Measure(new Size(260, double.PositiveInfinity));
-                Try("card-" + name, () => e, 260, w.Pill ? CardWindow.PillH : Math.Ceiling(e.DesiredSize.Height));
+                e.Measure(new Size(w.Card.W, double.PositiveInfinity));
+                Try("card-" + name, () => e, w.Card.W, w.Pill ? CardWindow.PillH : w.Card.H ?? Math.Ceiling(e.DesiredSize.Height));
             }
             catch (Exception ex) { errors.Add($"card-{name}: {ex}"); }
             finally { w.Close(); }

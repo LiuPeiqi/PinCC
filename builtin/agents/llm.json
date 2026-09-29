@@ -1,0 +1,7 @@
+{
+  "name": "llm",
+  "label": "llm (Simon Willison)",
+  "priority": 50,
+  "args": ["-n", "--no-stream", "{model}"],
+  "model": ["-m", "{value}"]
+}

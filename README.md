@@ -35,7 +35,7 @@
 - **高度自适应**。卡片默认按内容自动长高（最高约 40% 屏幕高），拉动边缘改高度后就固定下来；**双击下边缘**恢复自适应。
 - **链接卡片**：网站 · 域名 · 日期、标题、摘要（生成前先显示网页描述），然后是你自己的备注。
 - **文档卡片**：类型 · 大小 · 修改时间 · 所在文件夹，以及开头的正文或摘要。
-- **图片卡片**：只有一张图片、没有文字时，整图无边框悬浮，初始为 1:1 像素大小（最大半屏）。滚轮缩放，中键恢复 1:1，Ctrl+拖动可把图片拖进其他程序；折叠后变成缩略方块。多张图片显示为一排缩略图。网址本身是图片时，卡片直接变成这张图片。
+- **图片卡片**：只有一张图片、没有文字时，整图无边框悬浮，初始为 1:1 像素大小（最大半屏）。滚轮缩放，中键恢复 1:1，Ctrl+拖动可把图片拖进其他程序；悬停时操作按钮浮在图片底部一条深色圆角底板上，什么图片上都看得清；折叠后变成缩略方块。多张图片显示为一排缩略图。网址本身是图片时，卡片直接变成这张图片。
 - **Markdown**：`#` 标题、**粗体**、*斜体*、~~删除线~~、`代码`、链接、`> 引用`、代码块、列表。点击 `- [ ]` 任务前的方框就会勾选，只改写这一行。
 - **清单**：已勾选达到 3 项、并且还有未完成项时，已勾选的项折叠成一行“已完成 N 项”，点它展开或收起（只影响显示）。全部勾完后，右下角的 ○ 高亮并常驻，点一下就完成整张卡片（不会自动完成，清单也可以当模板反复用）。折叠成胶囊时显示下一项，例如“周末 · 买菜”。
 - **到期提醒**：卡片自动显示、展开、置顶，红框闪三下后保持红色，并响一声。卡片上直接有“10分钟”“1小时”“○”三个按钮。全屏游戏、视频或演示时先不打扰，结束后再提醒。
@@ -63,7 +63,7 @@
 
 ## AI 摘要（本地 CLI LLM）
 
-第一次启动时，PinCC 会自动查找可用的工具：先找 Windows 里的 claude、codex、gemini、qwen、llm、ollama，再找 WSL 里的。找到后，**新建链接或文档卡片**时会自动读取正文并生成摘要；**笔记**只有在你点 ✨ 时才摘要。
+第一次启动时，PinCC 会自动查找可用的工具：先找 Windows 里的 claude、codex、gemini、qwen、llm、ollama（以及你自己添加的执行器），再找 WSL 里的。找到后，**新建链接或文档卡片**时会自动读取正文并生成摘要；**笔记**只有在你点 ✨ 时才摘要。
 
 之后可以在 **管理 › 设置 › AI 摘要** 里自己选：
 
@@ -72,7 +72,7 @@
 | 运行环境 | **Windows** 或 **WSL**；WSL 可以指定发行版（留空用默认发行版） |
 | 工具 | 关闭 / claude / codex / gemini / qwen / llm / ollama / **自定义**。点“检测”会在当前环境里查找，找到的标 ✓ |
 | 模型 | 可选，例如 `sonnet`、`gpt-5.1`；ollama 必须填 |
-| 自定义命令 | 任意命令行：Windows 下由 cmd.exe 执行，WSL 下由 bash 执行。约定：**从标准输入读取提示词，把回答输出到标准输出**，例如 `ollama run qwen2.5 --nowordwrap`。只用于文字摘要（读网页、读 PDF 需要 claude 这类能用工具的 CLI） |
+| 自定义命令 | 任意命令行：Windows 下由 cmd.exe 执行，WSL 下由 bash 执行。约定：**从标准输入读取提示词，把回答输出到标准输出**，例如 `ollama run qwen2.5 --nowordwrap`。只用于文字处理（让模型自己读网页、读 PDF，需要有 web / read 授权的执行器，例如 claude） |
 
 “测试”会用当前设置实际运行一次；下方显示实际执行的完整命令。改动立即生效。
 
@@ -81,6 +81,30 @@
 - **读文档**：txt/md/代码/csv/json、docx/pptx/xlsx 由 PinCC 直接提取文字；PDF 等其他格式让 claude 在文档所在文件夹里用 Read 工具读取（只开放 Read，不加载那个文件夹里的 `.claude` 设置）。文档改动或被删除后，卡片会在 15 秒内更新，旧摘要标为过时。
 - **隐私**：只自动读取公网地址。内网地址、localhost、解析到内网的域名、带账号密码或 token/key/sig/code 这类参数的链接，都不会被自动抓取和发送；自动读取时如果跳转到了内网地址也会停下。这些情况需要你手动点 ✨。
 - **过时提示**：卡片内容改动后，摘要会变淡，并重新出现 ✨；结果回来时如果内容已经变了，这次结果直接丢弃。
+
+### 技能与执行器：让 LLM 用上别的工具和流程
+
+摘要只是内置的一个**技能**。技能和**执行器**都是数据目录里的普通文件，添加一个文件就多一种能力，不需要改程序：
+
+- **执行器** `agents\<名字>.json`：怎样调用一个 CLI 模型（参数、模型怎么传），以及它能被授予什么：`web`（自己上网读）、`read`（读文档所在文件夹）、`shell:<命令前缀>`（只允许以这个前缀开头的命令）。内置 6 个，同名文件覆盖内置的。
+- **技能** `skills\<名字>\SKILL.md`（与 Claude 的技能格式相同）：什么卡片用它（网址/路径通配、类型、扩展名、#标签，或者整个桌面）、什么时候跑（✨、自动、只在菜单里）、先运行什么程序取数据（比如 `lark-cli`、`pdftotext`，可以在 WSL 里）、允许模型做什么、结果写到哪里（摘要、追加到正文、新建卡片，或者由模型自己调用 PinCC 命令行写回）。正文就是提示词。
+
+```text
+---
+name: feishu-doc
+label: 飞书文档
+description: 用 lark-cli 读取飞书云文档正文，再压缩成卡片摘要
+when: {"src": ["https://*.feishu.cn/*", "https://*.larksuite.com/*"], "on": ["ask"]}
+context: [{"run": ["lark-cli", "docs", "+fetch", "--doc", "{src}", "--doc-format", "markdown"], "where": "wsl", "timeout": 90}]
+output: summary
+---
+把 <document> 里的飞书文档压缩成便签卡片上的摘要……
+```
+
+- 飞书链接卡片上的 ✨ 会变成“✨ 飞书文档”；其他卡片照旧是摘要。条件越具体的技能越优先。卡片右键“技能 ›”可以选别的技能，桌面技能（例如按全部卡片排出今日计划）在 + 的右键菜单里。
+- 会运行程序或授权模型的技能，**第一次运行前会弹窗确认**（列出命令和授权）。之后文件一改，就会再确认一次。
+- 授权 `pincc` 时，模型可以自己调用 PinCC 命令行加卡片、加任务、写摘要。这次运行的所有写入算一个操作组，Ctrl+Z 或 `PinCC restore` 可以一次撤销。
+- 每次运行记录在数据目录的 `runs.log`。设置页“技能与执行器”显示生效的技能、执行器和文件错误。示例在 `docs/examples/skills`。
 
 ---
 
@@ -96,6 +120,9 @@ PinCC set <id> [文字|-] [--append] [选项] [--check N] [--uncheck N] [--if-re
 PinCC rm <id> [--json]                  删除（可恢复）
 PinCC log [N] [--json]                  最近的操作（第一列是操作组编号）
 PinCC restore <组编号> [--json]          撤销整组操作（只写回这组改过的内容）
+PinCC skills [--json]                   列出技能和执行器（含文件错误）
+PinCC run <技能> [<id>] [--json]         运行一个技能并按它的 output 写回
+PinCC help --skill                      输出一份教其他 agent 使用 PinCC 的 SKILL.md
 PinCC help                              完整说明（面向 LLM 工具）
 
 选项：--summary <文字|->  --remind <时间|off>  --done | --undone  --color <0-8|auto>  --top | --normal  --image <图片文件>  --json
@@ -192,9 +219,12 @@ build.cmd
 ```text
 src/Program.cs          入口：带参数 = 命令行，不带参数 = 桌面程序（单实例）
 src/Core/               纯逻辑：Db（winsqlite3）、Store（修改与操作记录）、Card（派生状态）、Cli、
-                        When（时间解析）、Markdown、Fetch（网页/文档）、Llm、Proc（子进程与 Job）
+                        When（时间解析）、Markdown、Fetch（网页/文档）、Llm、Agents（执行器）、Skills（技能管线）、
+                        Proc（子进程与 Job）
+builtin/                随程序发布的执行器（agents/*.json）和技能（skills/*/SKILL.md），与 Mac 版共用
 src/UI/                 WPF：Desk（唯一的修改入口与布局）、CardWindow、HubWindow（+ 按钮）、ManageWindow、
                         Flyout（提醒/颜色）、Layout（纯函数）、Native（Win32）、Hotkeys、MarkdownView、Theme.xaml
-tests/                  无需测试框架的自测（When、Markdown、Card、Layout、Store、Fetch）
+tests/                  无需测试框架的自测（When、Markdown、Card、Layout、Store、Fetch、技能）
 docs/DESIGN.md          设计说明与取舍记录
+docs/examples/skills/   技能示例（飞书文档）
 ```

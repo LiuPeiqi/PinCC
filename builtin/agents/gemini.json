@@ -1,0 +1,8 @@
+{
+  "name": "gemini",
+  "label": "Gemini CLI",
+  "priority": 30,
+  "args": ["-o", "text", "{model}", "-p", "请严格按上面的要求输出。"],
+  "model": ["--model", "{value}"],
+  "promptEscapes": { "@": "\\@" }
+}

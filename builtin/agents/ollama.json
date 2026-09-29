@@ -1,0 +1,9 @@
+{
+  "name": "ollama",
+  "label": "Ollama",
+  "priority": 60,
+  "args": ["run", "{model}", "--hidethinking", "--nowordwrap"],
+  "model": ["{value}"],
+  "requiresModel": true,
+  "listModels": ["list"]
+}

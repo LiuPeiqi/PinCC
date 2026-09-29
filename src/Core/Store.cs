@@ -104,6 +104,35 @@ public sealed partial class Store : IDisposable
 
     public Group Begin() => new();
 
+    /// <summary>
+    /// Gives <paramref name="g"/> its number now, with a "run" marker (card 0) instead of a first change: a skill run
+    /// whose model calls the CLI hands that number on as PINCC_GROUP, so every write of the run is one undo step.
+    /// </summary>
+    public void Reserve(Group g)
+    {
+        Writable();
+        if (g.Id == 0) InTx(g, () => { Journal(g, 0, 0, 0, "run", null, []); return 0; });
+    }
+
+    /// <summary>
+    /// The group of a running skill (PINCC_GROUP), or null when <paramref name="grp"/> is no such reservation — or one
+    /// older than an hour (a variable left over in a shell must not merge today's writes into an old run).
+    /// </summary>
+    public Group? Join(long grp) =>
+        Convert.ToInt64(Db.Scalar("SELECT count(*) FROM ops WHERE grp=? AND op='run' AND card_id=0 AND at>?", grp, When.NowMs - 3_600_000)) > 0 ? new Group { Id = grp } : null;
+
+    /// <summary>After a run: a reserved group that holds nothing but its marker is dropped (nothing to undo, nothing to export).</summary>
+    public void Release(Group g)
+    {
+        if (g.Id == 0 || ReadOnly) return;
+        Db.Tx(() =>
+        {
+            if (Convert.ToInt64(Db.Scalar("SELECT count(*) FROM ops WHERE grp=? AND card_id<>0", g.Id)) == 0) Db.Exec("DELETE FROM ops WHERE grp=? AND card_id=0 AND op='run'", g.Id);
+            return 0;
+        });
+        if (Convert.ToInt64(Db.Scalar("SELECT count(*) FROM ops WHERE grp=?", g.Id)) == 0) { g.Id = 0; g.Cards.Clear(); }
+    }
+
     /// <summary>Inserts a new card, journaled as "create" (undo = delete).</summary>
     public Card Insert(Group g, Card c)
     {
@@ -223,6 +252,7 @@ public sealed partial class Store : IDisposable
             foreach (var r in Db.Query("SELECT * FROM ops WHERE grp=? ORDER BY id DESC", grp))
             {
                 var cardId = (long)r["card_id"]!;
+                if (cardId == 0) continue; // a skill run's marker: nothing to restore
                 if (!ids.Contains(cardId)) ids.Add(cardId);
                 var cur = Get(cardId);
                 if (r["before"] is string json)

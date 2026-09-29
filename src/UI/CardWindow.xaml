@@ -22,6 +22,14 @@
                          FontFamily="{StaticResource Ui.Font}" VerticalAlignment="Stretch"/>
             </Grid>
 
+            <!-- Picture cards: the action row floats on this bar over the image; a plain scrim got lost on bright, busy pictures. -->
+            <Border x:Name="Bar" Grid.Row="0" VerticalAlignment="Bottom" Height="34" Margin="6,0,6,6" CornerRadius="10"
+                    Background="#E0202428" BorderBrush="#40FFFFFF" BorderThickness="1" Visibility="Collapsed" IsHitTestVisible="False">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="12" ShadowDepth="2" Direction="270" Opacity="0.4"/>
+                </Border.Effect>
+            </Border>
+
             <!-- One reserved action row: state chips on the left (shown when set), actions on the right (on hover). -->
             <Grid x:Name="Row" Grid.Row="1" Height="28" Margin="5,0,5,3">
                 <StackPanel x:Name="Chips" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center"/>

@@ -22,5 +22,7 @@
   <ItemGroup>
     <Using Include="System.IO" />
     <Resource Include="pincc.ico" />
+    <!-- Runner profiles and skills are data shared with the Mac app: repo folder builtin/, embedded as "builtin/…". -->
+    <EmbeddedResource Include="..\builtin\**\*.json;..\builtin\**\*.md" LogicalName="builtin/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

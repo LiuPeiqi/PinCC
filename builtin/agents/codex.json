@@ -1,0 +1,11 @@
+{
+  "name": "codex",
+  "label": "Codex CLI",
+  "priority": 20,
+  "args": ["exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--color", "never", "{grants}", "{model}", "-"],
+  "model": ["-m", "{value}"],
+  "grants": {
+    "none": [],
+    "web": ["-c", "web_search=live"]
+  }
+}

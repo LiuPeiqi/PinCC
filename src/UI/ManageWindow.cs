@@ -187,6 +187,9 @@ public sealed class ManageWindow : AuxWindow
             Content = new StackPanel { Margin = new Thickness(0, 6, 0, 0), Children = { prompt, reset } },
         });
 
+        root.Children.Add(Heading("技能与执行器"));
+        root.Children.Add(SkillsPanel());
+
         root.Children.Add(Heading("外观与布局"));
         root.Children.Add(Row("新卡配色", Segments("color", [("off", "关"), ("rotate", "轮换"), ("kind", "按类型"), ("tag", "按 #标签")], _s.Setting("color.mode", "rotate"), v => Set("color.mode", v))));
         root.Children.Add(Row("文字大小", Segments("size", [("13", "小"), ("14", "中"), ("16", "大"), ("18", "特大")], _s.Setting("text.size", "14"), v => Set("text.size", v))));
@@ -206,6 +209,55 @@ public sealed class ManageWindow : AuxWindow
         root.Children.Add(Row("数据与接口", data));
         root.Children.Add(Muted($"数据：{_s.Home}\\pincc.db（SQLite；每天自动备份到 backup\\，保留 7 份）\n命令行：\"{Environment.ProcessPath}\" help"));
         return root;
+    }
+
+    /// <summary>
+    /// Skills (skills\&lt;name&gt;\SKILL.md) and runner profiles (agents\&lt;name&gt;.json) are files: what is in effect,
+    /// what is broken and why, and the folders to edit. Changes are picked up by themselves within seconds.
+    /// </summary>
+    FrameworkElement SkillsPanel()
+    {
+        var panel = new StackPanel();
+        void Fill()
+        {
+            panel.Children.Clear();
+            Skills.Refresh(_s.Home);
+            Runners.Refresh(_s.Home);
+            foreach (var k in Skills.All)
+            {
+                var when = string.Join(" ", new[]
+                {
+                    k.Scope == "desk" ? "整个桌面（+ 的右键菜单）" : null, k.Src.Count > 0 ? "来源 " + string.Join(" ", k.Src) : null,
+                    k.Kinds.Count > 0 ? "类型 " + string.Join(",", k.Kinds) : null, k.Exts.Count > 0 ? "扩展名 " + string.Join(",", k.Exts) : null, k.Tag != null ? "#" + k.Tag : null,
+                }.OfType<string>());
+                var on = string.Join("、", k.On.Select(o => o switch { "ask" => "✨", "create" => "自动", _ => "菜单" }));
+                var state = !k.NeedsApproval ? "" : _s.Setting("skill.ok." + k.Name) == k.Hash ? " · 已确认" : " · 第一次运行时确认";
+                var line = Muted($"{k.Label}（{k.Name} · {(k.Builtin ? "内置" : "用户")}）：{k.Description}\n    {on}{(when.Length > 0 ? " · " + when : "")} · 输出 {k.Output}"
+                    + (k.Grants.Count > 0 ? " · 授权 " + string.Join(",", k.Grants) : "") + (k.Runner != null ? " · 执行器 " + k.Runner : "") + state);
+                line.TextWrapping = TextWrapping.Wrap;
+                line.Margin = new Thickness(0, 2, 0, 2);
+                panel.Children.Add(line);
+            }
+            panel.Children.Add(Muted("执行器：" + string.Join("、", Runners.All.Select(p => p.Name + (p.Origin == "内置" ? "" : "（用户）")))));
+            foreach (var e in Skills.Errors.Concat(Runners.Errors))
+                panel.Children.Add(new TextBlock { Text = "✗ " + e, Foreground = Palette.Brush(Palette.Overdue), FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) });
+            var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 4) };
+            buttons.Children.Add(Btn("打开技能文件夹", () => OpenFolder(Skills.Dir(_s.Home))));
+            buttons.Children.Add(Btn("打开执行器文件夹", () => OpenFolder(Runners.Dir(_s.Home))));
+            buttons.Children.Add(Btn("重新加载", () => { Skills.Reload(_s.Home); Runners.Reload(_s.Home); Fill(); }));
+            buttons.Children.Add(Btn("复制给 agent 的 SKILL.md", () => { try { Clipboard.SetText(Cli.AgentSkill()); Desk.Notify("已复制：放进 agent 的技能目录，它就会用 PinCC"); } catch { } }));
+            foreach (var b in buttons.Children.OfType<FrameworkElement>().Skip(1)) b.Margin = new Thickness(8, 0, 0, 0);
+            panel.Children.Add(buttons);
+            panel.Children.Add(Muted("技能 = skills\\<名字>\\SKILL.md（何时用、先取什么数据、允许模型做什么、结果写到哪里；正文是提示词）；执行器 = agents\\<名字>.json（怎样调用一个 CLI 模型）。同名文件覆盖内置的。示例：docs\\examples\\skills。"));
+        }
+        Fill();
+        return panel;
+    }
+
+    static void OpenFolder(string dir)
+    {
+        Directory.CreateDirectory(dir);
+        Process.Start("explorer.exe", $"\"{dir}\"");
     }
 
     /// <summary>
@@ -266,7 +318,7 @@ public sealed class ManageWindow : AuxWindow
             if (key != ScanKey()) return; // switched meanwhile: that scan's own call reports
             if (wsl && r.Env.Count > 0) _s.SetSetting("llm.env", System.Text.Json.JsonSerializer.Serialize(r.Env)); // PATH/proxies of this distribution
             status.Text = r.Error != null ? "✗ " + r.Error
-                : r.Tools.Count == 0 ? $"{(wsl ? "WSL" : "Windows")} 中没有找到 claude / codex / gemini / qwen / llm / ollama；可以用“自定义”"
+                : r.Tools.Count == 0 ? $"{(wsl ? "WSL" : "Windows")} 中没有找到 {string.Join(" / ", Runners.All.Select(p => p.Program))}；可以用“自定义”，或在执行器文件夹里添加"
                 : $"{(wsl ? "WSL" : "Windows")} 中找到：{string.Join("、", r.Tools)}（标 ✓）";
             Apply();
         }

@@ -1,0 +1,13 @@
+{
+  "name": "claude",
+  "label": "Claude Code",
+  "priority": 10,
+  "args": ["-p", "--output-format", "text", "{grants}", "--strict-mcp-config", "--no-session-persistence", "{model}"],
+  "model": ["--model", "{value}"],
+  "grants": {
+    "none": ["--tools", ""],
+    "web": ["--tools", "WebFetch,WebSearch", "--allowedTools", "WebFetch,WebSearch", "--permission-mode", "dontAsk", "--max-turns", "8"],
+    "read": ["--tools", "Read", "--allowedTools", "Read", "--permission-mode", "dontAsk", "--max-turns", "6", "--setting-sources", "user"],
+    "shell": ["--tools", "Bash", "--allowedTools", "Bash({prefix}:*)", "--permission-mode", "dontAsk", "--max-turns", "12"]
+  }
+}

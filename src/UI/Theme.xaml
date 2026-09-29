@@ -6,7 +6,7 @@
 
     <DropShadowEffect x:Key="Ui.Shadow" BlurRadius="18" ShadowDepth="3" Direction="270" Opacity="0.18" Color="#000000"/>
 
-    <!-- ===== Context menus (flat, rounded, no submenus) ===== -->
+    <!-- ===== Context menus (flat, rounded; a submenu opens to the side in the same box) ===== -->
     <Style TargetType="ContextMenu">
         <Setter Property="HasDropShadow" Value="False"/>
         <Setter Property="FontFamily" Value="{StaticResource Ui.Font}"/>
@@ -40,12 +40,31 @@
                             <ContentPresenter x:Name="Ic" ContentSource="Icon" VerticalAlignment="Center" HorizontalAlignment="Left"
                                               TextElement.FontFamily="{StaticResource Ui.Icons}" TextElement.FontSize="14"/>
                             <ContentPresenter Grid.Column="1" ContentSource="Header" VerticalAlignment="Center" RecognizesAccessKey="False"/>
-                            <TextBlock Grid.Column="2" Text="{TemplateBinding InputGestureText}" Margin="18,0,0,0" VerticalAlignment="Center"
+                            <TextBlock x:Name="Gesture" Grid.Column="2" Text="{TemplateBinding InputGestureText}" Margin="18,0,0,0" VerticalAlignment="Center"
                                        Foreground="{DynamicResource Ui.Muted}" FontSize="12"/>
+                            <TextBlock x:Name="Arrow" Grid.Column="2" Text="&#xE76C;" Margin="18,0,0,0" VerticalAlignment="Center" Visibility="Collapsed"
+                                       FontFamily="{StaticResource Ui.Icons}" FontSize="10" Foreground="{DynamicResource Ui.Muted}"/>
+                            <!-- The offsets undo the box's shadow margin so the submenu's first row lines up with its header. -->
+                            <Popup x:Name="PART_Popup" PlacementTarget="{Binding ElementName=Bd}" Placement="Right" HorizontalOffset="-3" VerticalOffset="-11"
+                                   AllowsTransparency="True" Focusable="False" PopupAnimation="None"
+                                   IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}">
+                                <Border Margin="10,6,10,14" Padding="4" CornerRadius="8" MinWidth="150"
+                                        Background="{DynamicResource Ui.Bg}" BorderBrush="{DynamicResource Ui.Border}" BorderThickness="1"
+                                        Effect="{StaticResource Ui.Shadow}">
+                                    <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                                </Border>
+                            </Popup>
                         </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
+                        <Trigger Property="Role" Value="SubmenuHeader">
+                            <Setter TargetName="Arrow" Property="Visibility" Value="Visible"/>
+                            <Setter TargetName="Gesture" Property="Visibility" Value="Collapsed"/>
+                        </Trigger>
                         <Trigger Property="IsHighlighted" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Ui.Hover}"/>
+                        </Trigger>
+                        <Trigger Property="IsSubmenuOpen" Value="True">
                             <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Ui.Hover}"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
@@ -84,7 +103,11 @@
     </Style>
 
     <!-- ===== Card row: state chips (glyph + text) and hover actions (glyph). They inherit the card's ink. ===== -->
+    <!-- Hover wash of chips and actions; a picture card's dark bar overrides it with a light wash (CardWindow.BarHover). -->
+    <SolidColorBrush x:Key="Card.Hover" Color="#14000000"/>
     <Style x:Key="Card.Chip" TargetType="Button">
+        <!-- Follow the row's ink (a picture's bar sets white); the theme's Button style would otherwise force black. -->
+        <Setter Property="Foreground" Value="{Binding Path=(TextElement.Foreground), RelativeSource={RelativeSource AncestorType=Panel}}"/>
         <Setter Property="Focusable" Value="False"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="Padding" Value="6,2"/>
@@ -97,7 +120,7 @@
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="#14000000"/>
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Card.Hover}"/>
                             <Setter TargetName="Bd" Property="Opacity" Value="1"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
@@ -107,6 +130,8 @@
     </Style>
 
     <Style x:Key="Card.Action" TargetType="Button">
+        <!-- Follow the row's ink (a picture's bar sets white); the theme's Button style would otherwise force black. -->
+        <Setter Property="Foreground" Value="{Binding Path=(TextElement.Foreground), RelativeSource={RelativeSource AncestorType=Panel}}"/>
         <Setter Property="Width" Value="28"/>
         <Setter Property="Height" Value="28"/>
         <Setter Property="FontFamily" Value="{StaticResource Ui.Icons}"/>
@@ -126,7 +151,7 @@
                             <Setter TargetName="Bd" Property="Background" Value="#10000000"/>
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="#14000000"/>
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Card.Hover}"/>
                             <Setter TargetName="Bd" Property="Opacity" Value="0.95"/>
                         </Trigger>
                     </ControlTemplate.Triggers>

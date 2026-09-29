@@ -318,7 +318,7 @@ public partial class CardWindow : Window
         var info = c.SrcInfo;
 
         if (Busy != null) Stack.Children.Add(Spaced(Caption(Busy, cx.Muted, null)));
-        else if (Problem != null) Stack.Children.Add(Spaced(Caption("⚠ " + Problem + " · 重试", Palette.Brush(Palette.Overdue), () => _desk.Summarize(this))));
+        else if (Problem != null) Stack.Children.Add(Spaced(Caption("⚠ " + Problem + " · 重试", Palette.Brush(Palette.Overdue), () => _desk.Ask(this))));
         else if (info?.State == "blocked" && string.IsNullOrWhiteSpace(c.Summary)) Stack.Children.Add(Spaced(Caption("正文不可获取 · 仅标题/描述", cx.Muted, null)));
 
         if (!string.IsNullOrWhiteSpace(c.Summary))
@@ -513,11 +513,14 @@ public partial class CardWindow : Window
                 list.Add(chip);
             }
         }
-        if (!compact && _desk.Llm != null && Busy == null)
+        if (!compact && _desk.Llm != null && Busy == null && _desk.AskSkill(c) is { } skill)
         {
+            // ✨ runs the card's skill (the built-in summary unless a more specific skill matches this card).
             bool none = string.IsNullOrWhiteSpace(c.Summary);
-            bool wantsSummary = c.SummaryStale || none && (_overflow || c.Src != null && !_desk.AutoSummarizes(c));
-            if (wantsSummary) list.Add(Chip(null, "✨ 摘要", c.SummaryStale ? "内容已改动：重新生成摘要" : "用 CLI LLM 生成摘要", () => _desk.Summarize(this)));
+            bool wants = skill.Output != "summary" || c.SummaryStale || none && (_overflow || c.Src != null && !_desk.AutoRuns(c));
+            bool builtin = skill.Builtin && skill.Name == "summary";
+            if (wants) list.Add(Chip(null, "✨ " + (builtin ? "摘要" : skill.Label),
+                c.SummaryStale ? "内容已改动：重新生成" : builtin ? "用 CLI LLM 生成摘要" : skill.Description, () => _desk.Ask(this)));
         }
         return list;
     }
@@ -529,6 +532,7 @@ public partial class CardWindow : Window
         _addChip = null;
         bool show = !Editing && !Pill && Strip == null;
         Row.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        Bar.Visibility = Visibility.Collapsed;
         if (!show) return;
         var c = Card;
         Chips.Visibility = Actions.Visibility = Adding ? Visibility.Collapsed : Visibility.Visible;
@@ -539,20 +543,20 @@ public partial class CardWindow : Window
         }
         if (c.ImageOnly)
         {
-            // Pictures stay full-bleed: the row floats over the image bottom on a scrim, on hover only.
+            // Pictures stay full-bleed: the row floats over the image bottom on a dark bar (Bar), on hover only.
             Grid.SetRow(Row, 0);
             Row.VerticalAlignment = VerticalAlignment.Bottom;
-            Row.Margin = new Thickness(0);
-            Row.Background = new LinearGradientBrush(Colors.Transparent, Color.FromArgb(0x90, 0, 0, 0), 90);
+            Row.Margin = new Thickness(9, 0, 9, 9);
             TextElement.SetForeground(Row, Brushes.White);
+            Row.Resources["Card.Hover"] = BarHover;
         }
         else
         {
             Grid.SetRow(Row, 1);
             Row.VerticalAlignment = VerticalAlignment.Stretch;
             Row.Margin = new Thickness(5, 0, 5, 3);
-            Row.Background = null;
             Row.ClearValue(TextElement.ForegroundProperty);
+            Row.Resources.Remove("Card.Hover");
         }
         foreach (var chip in StateChips(compact: false)) Chips.Children.Add(chip);
 
@@ -608,10 +612,13 @@ public partial class CardWindow : Window
             if (_hoverShown) tb.Inlines.Add(new Run(" \uE710") { Tag = "add", FontFamily = MarkdownView.Icons, FontSize = _desk.FontSize - 4, BaselineAlignment = BaselineAlignment.Center });
             else tb.Inlines.Remove(tb.Inlines.LastInline);
         }
-        if (Card.ImageOnly && Strip == null && !Pill && !Editing) Row.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (Card.ImageOnly && Strip == null && !Pill && !Editing) Row.Visibility = Bar.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         foreach (var e in Stack.Children.OfType<DockPanel>().SelectMany(d => d.Children.OfType<StackPanel>()).SelectMany(p => p.Children.OfType<FrameworkElement>()))
             if (e.Tag is "hover") e.Visibility = _hoverShown ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    /// <summary>Hover wash of the buttons on a picture's dark bar (the default wash darkens, which a dark bar would hide).</summary>
+    static readonly Brush BarHover = Palette.Brush(Colors.White, 0.18);
 
     Button Chip(string? glyph, string? text, string? tip, Action? click, Brush? fg = null)
     {

@@ -31,7 +31,7 @@
   6. 布局和卡片内容的向量来自真实的 WPF 代码，全程不显示窗口（§5.9）。
   7. 移植台账记录每个 C# 成员和对应 Swift 代码的哈希，有任何一方变了而另一方没跟上，Mac 版就不允许构建；Windows 版从不被卡住（§5.11）。
 - **数据通用**（§4）：
-  - L1（必须做到）：任一端建的数据目录（pincc.db、img/、files/、backup/）在另一端能打开、迁移、列出、编辑、撤销和清理；CLI 在两端对两端的数据行为相同。
+  - L1（必须做到）：任一端建的数据目录（pincc.db、img/、files/、backup/，以及用户的执行器和技能文件 agents/、skills/）在另一端能打开、迁移、列出、编辑、撤销和清理；CLI 在两端对两端的数据行为相同。
   - L2（推荐，由你确认）：先做 `export` / `import` 两个命令，用一个 SQLite 文件在两台电脑之间搬数据；以后再考虑合并导入或经同步文件夹的持续同步。运行中的数据库永远不放进云同步文件夹。
 - **Windows 端的改动**：测试基础设施（W0）；一个生产环境下为恒等的时钟接缝（W1）；一组只在边界情况下改变输出的确定性修正（W2，含 §12 第 7 条的图片行和命令名常量）；少数需要你确认的数据格式修正（W3）；分文件、先录特征再搬的纯函数抽取，以及 LayoutPass 的影子模式和切换（W4a、W4b）；真实使用轨迹录制器（W4c）；按 Id 排序这一声明的行为变化（W4d）；`export`、`import` 两个新命令和按数据目录的 GUI 互斥量（W5）。每一处都要先证明行为不变，或只在声明的地方变化（§3.5）。
 - **工作量**：约 131 个工作日（区间 118–150），含 P0 的 5 天和约 15% 预留。P0 与 P1 并行，所以关键路径约 126 个工作日。接受 §10.3 的三项裁剪后工作量约 122 天（关键路径约 117 天）。另有日历上的试用期（Windows 发布后的试用、LayoutPass 影子模式 10 天）和你本人在 Mac 前的手工检查（§10.2），与后续阶段重叠进行。
@@ -53,7 +53,7 @@
 | 行为规则：唯一修改入口、撤销分组、提醒只响一次、编辑 / 撤销条 / 临时展开的状态切换 | 快捷键（Ctrl ↔ ⌘）、菜单写法、设置窗口的形式、开机或登录启动的方式 |
 | **数据**：同一个数据目录格式，任一端写的数据另一端都能用（§4） | 数据目录的默认位置、日志和缓存目录 |
 | CLI：同一组命令、参数、JSON 字节、`--md` 输出、退出码 0–4 | 命令名（`PinCC.exe` / `pincc`）、安装方式、帮助里的平台段落 |
-| LLM：工具表、提示词、隐私守卫、摘要过时规则 | 工具查找方式（注册表 PATH + WSL / 登录 shell 环境）、子进程清理方式 |
+| LLM 与技能：执行器文件（`agents/*.json`）、技能文件（`SKILL.md`）、技能的选择规则和运行契约、提示词、隐私守卫、摘要过时规则 | 运行环境（Windows / WSL ↔ 本机登录 shell）、工具查找方式（注册表 PATH + WSL / 登录 shell 环境）、子进程清理方式、确认对话框的样式 |
 | 抓取：编码识别、正文提取、Office 文本 | HTTP 实现（HttpClient / URLSession）、无头渲染（Edge / WebKit） |
 | 防抖和批处理规则、1 秒评估网格 | 定时器实现（Windows DispatcherTimer；Mac 带误差的节拍加到点唤醒） |
 
@@ -98,6 +98,9 @@
 | 全屏窗口 | 全屏应用在前时 | Windows 把卡片退到全屏窗口后面（Desk.cs:961-971）；Mac 的全屏应用在单独的桌面空间，不需要处理（§8.11） | 只影响层级，不写库 |
 | “需要授权”状态 | Mac 的 TCC 拒绝访问 | 只在 Mac 出现的运行时状态，不写 meta（§8.13） | DATA.md 登记 |
 | 子进程清理 | LLM 子进程树 | Windows 用 Job 对象；Mac 用 killpg 近似，调用 setsid 的孙进程收不到 | Proc 契约测试 |
+| 技能取数步骤的 `where` | `where` 为 `windows` 或 `wsl` 的 run 步骤（§4.2.10） | Mac 上没有这两种环境。执行器和技能的其余部分（文件格式、选择规则、授权、写回）两端相同，运行环境在 Mac 上只有“本机” | 文件照常解析和列出；运行到这一步时失败，不再执行后面的步骤和模型，文案登记在 mac 表里；前面的取数步骤只读，不写库 |
+| PinCC 自身的路径 | `PINCC_EXE`、`pincc` 授权展开出的命令前缀（§4.2.10） | 各自是本机可执行文件的路径（Mac 是 `Helpers/pincc` 的真实路径） | 录制和向量里替换成 `{EXE}`（§4.2.8） |
+| + 贴剪贴板图片被系统拦下 | macOS 的剪贴板隐私设置拒绝读取时（§8.8） | 只有 Mac 有这项权限 | 与“剪贴板里没有新图片”相同：新建空白卡片，不写库 |
 | 历史日期的时区 | 早于向量网格的日期 | Windows 与 IANA 的时区数据不同 | 向量只取两套数据一致的日期，DATA.md 登记 |
 | 裁剪项 a、c | 夏令时回拨那一小时的提醒；HtmlExtract 的 Text | 见 §10.3 | 只在采用时登记 |
 
@@ -151,6 +154,7 @@ PinCC/
   build.cmd                 不变：dotnet run --project tests，然后两次 dotnet publish src（§5.16）
   .gitattributes            新增（W2）：*.cs text eol=lf；contracts/**/*.jsonl text eol=lf；*.gz binary
   src/                      Windows 程序，路径不变；只有 §3.5 列出的改动
+  builtin/                  内置执行器 agents/*.json 和技能 skills/<名字>/SKILL.md：两端共用的数据文件，Windows 嵌入 exe，Mac 原样放进 .app（§4.2.10）
   tests/                    现有测试项目（net10.0-windows，UseWPF），新增：
     Vectors/                向量生成器、.NET 基础语义表、数据表导出（Tables.cs）、正则清单、覆盖率统计
     Ledger/                 C# 成员扫描器（按词法处理字符串）和台账检查
@@ -198,9 +202,9 @@ PinCC/
 |---|---|
 | `CSQLite`、`CZlib` | `.systemLibrary`，module map 通过 shim.h `#include <sqlite3.h>` / `<zlib.h>`，Linux 和 macOS 用同一个模块，不用 `import SQLite3` 和 Compression。可变参数的 C 函数包成 static inline 函数 |
 | `DotNetCompat` | 按 .NET 导出的表重现 PinCC 依赖的 .NET 行为（§5.2、§6）：UTF-16 字符串操作、字符分类、不变大小写、NumberStyles 解析、银行家舍入、饱和转换、.NET 双精度文本、三种 System.Text.Json 写法和一个读取器、LocalDateTime（100 ns tick，带歧义夏令时标记）、.NET 时区规则、NetRegex（NSRegularExpression 的翻译工厂）、WinPath、NetUri、NetIP、HtmlDecode、代码页解码、SHA-1/SHA-256、有序字符串映射。表以 base64 字符串字面量嵌入，不用 `Bundle.module` |
-| `PinCCCore` | Db、Store、Card、CardMeta、When、Markdown、TextDecode、HtmlExtract、JsonLd、UrlGuard、FileFacts + ZipReader、WebRoute（WebCore 路由里的纯函数部分）、Llm（纯函数部分）、Proc（posix_spawn，POSIX，可在 WSL 测）、DataRules（异机路径、设置作用域、数据特性）、Home（唯一的数据目录解析）、Bundle（export/import） |
+| `PinCCCore` | Db、Store、Card、CardMeta、When、Markdown、TextDecode、HtmlExtract、JsonLd、UrlGuard、FileFacts + ZipReader、WebRoute（WebCore 路由里的纯函数部分）、Llm（纯函数部分）、Agents 和 Skills（执行器、技能文件的解析、校验、选择、授权翻译、参数和提示词构造，§4.2.10）、SkillRun（运行管线：取数步骤、模型、写回、run 标记、runs.log；经 Proc 启动，WSL 里用假执行器测试）、Proc（posix_spawn，POSIX，可在 WSL 测）、DataRules（异机路径、设置作用域、数据特性）、Home（唯一的数据目录解析）、Bundle（export/import） |
 | `PinCCCli` | 全部 CLI 命令，库 + `pincc` 可执行文件 |
-| `PinCCDesk` | DeskCore（经 IClock、IScheduler、IScreens、IWindowHost、IClipboard、IShell、ISound、IFocus、IImageInfo、IHotkeys、IAutoStart 接口工作的状态机）、LayoutPass、Layout、Rules、CardPresenter → CardScene、EditorOps、EditSession、MdRender、HubModel、选择器 / 卡片库 / 设置模型、MenuSpec、KeyBindings、SettingsSchema、ClipIngest |
+| `PinCCDesk` | DeskCore（经 IClock、IScheduler、IScreens、IWindowHost、IClipboard、IShell、ISound、IFocus、IImageInfo、IHotkeys、IAutoStart 接口工作的状态机）、LayoutPass、Layout、Rules、CardPresenter → CardScene、EditorOps、EditSession、AddSession（清单快速添加）、MdRender、HubModel、选择器 / 卡片库 / 设置模型、MenuSpec、KeyBindings、SettingsSchema、ClipIngest（含 + 贴图和编辑框粘贴的判断） |
 | `pincc-oracle` | Swift 端的脚本驱动和转储工具，供 interleave.sh 和 tools/mac.sh 使用 |
 | `pincc-selftest` | 不依赖 XCTest 的自检程序：读取 contracts/，跑全部向量族、操作脚本和 CLI 录制，输出通过和失败清单。供不能编译的 Intel Mac 原生运行（§9.1） |
 | 测试目标 | DotNetCompatTests、CoreVectorTests、ScriptReplayTests、CliTranscriptTests、DataCompatTests、DeskVectorTests、FakeHostScenarioTests、LedgerTests、LintTests |
@@ -220,6 +224,7 @@ PinCC.app/Contents/
   MacOS/PinCC               GUI 主程序；带 CLI 参数启动时也能直接走 CLI
   Helpers/pincc             只含 PinCCCli 的命令行程序，不链接 AppKit，冷启动快
   Resources/PinCC.icns 及其他资源（只通过 Bundle.main 读取）
+  Resources/builtin/        内置执行器和技能的原文件，供查看和复制；程序本身读嵌入的副本（§5.1）
 ```
 
 - `pincc` 放在 `Contents/Helpers`，不放 `Contents/Resources`：Apple 的包结构规定 Resources 只放非代码资源，放可执行文件会让严格的 codesign 校验和将来的公证报错。签名顺序由内而外：先签 `Helpers/pincc`，再签整个 .app（§9.6）。
@@ -243,19 +248,19 @@ PinCC.app/Contents/
 | 编号 | 阶段 | 改动 | 为什么 | 证明 | 需要你确认 |
 |---|---|---|---|---|---|
 | W0 | P1 | 只动 tests/ 和 oracle/：向量生成器、台账、脚本驱动、CLI 录制、互开检查、真实数据普查、OracleWpf | 基准实现的基础设施 | src/ 没有任何改动 | 否 |
-| W1a | P2 | `When.Clock`（`TimeProvider`，默认 `TimeProvider.System`）。`NowMs`、`LocalNow` 经过它；`Clock` 是 System 时 `LocalNow` 就是 `DateTime.Now` 本身（保留 Local 类型和歧义夏令时标记）。Core 里的调用点改走 When：Cli.cs:52、99、145、248，Store.cs:282（Purge 的文件时间下限）、291（备份日期） | 没有它，CLI、备份、清理和场景的向量都不确定 | 生产路径是恒等，可以逐行审阅；B0 不变 | 否 |
+| W1a | P2 | `When.Clock`（`TimeProvider`，默认 `TimeProvider.System`）。`NowMs`、`LocalNow` 经过它；`Clock` 是 System 时 `LocalNow` 就是 `DateTime.Now` 本身（保留 Local 类型和歧义夏令时标记）。Core 里的调用点改走 When：Cli.cs:52、99、145、248，Store.cs:282（Purge 的文件时间下限）、291（备份日期）；行号以 B0 为准，此后新增的调用点一并改，例如 Cli.cs 的 `DeskMarkdown`、Skills.cs 写 runs.log 的 `at`（`DateTime.Now`，格式串同时加 `InvariantCulture`，W2b）和耗时（`DateTime.UtcNow`，改用 Stopwatch） | 没有它，CLI、备份、清理和场景的向量都不确定 | 生产路径是恒等，可以逐行审阅；B0 不变 | 否 |
 | W1b | P2 | UI 里全部 14 处 `DateTime.Now` 改为 `When.LocalNow`：App.cs:77，CardWindow.xaml.cs:437、483、528、529、633、641，Flyout.cs:94、113，ManageWindow.cs:149，Desk.cs:148、978、980、983 | 场景向量要固定时间 | 同上 | 否 |
 | W1c | P2 | 把 App.cs:18-21 的语言覆盖和 Theme.xaml 合并抽成静态的 `App.Configure(Application)`，App 和 OracleWpf 都调用它 | OracleWpf 必须用与真程序相同的资源和 CJK 断行 | 逐行搬移，屏幕外快照不变 | 否 |
 | W1d | P2 | C# 测试：src/Core 里除 When.cs 以外禁止 `DateTime.Now`、`DateTime.UtcNow`、`DateTimeOffset.Now/UtcNow`；W1b 之后 src/UI 禁止 `DateTime.Now` 和 `DateTimeOffset.Now`。Native.cs:46、49 的 `DateTime.UtcNow` 是屏幕缓存的 2 秒单调计时，与业务时间无关，列入白名单并注明原因（§5.9 用反射设 `_cachedAt` 的做法因此不变） | 防止新的时钟泄漏 | 测试本身 | 否 |
 | W2 | P2 | 规范卫生，每项一个提交（§3.5.1），含图片行格式（l）和命令名常量（h） | 让规则与区域设置、排序实现无关，Swift 才能复现 | 你的 zh-CN 环境下所有 B0 向量不变，只有列出的边界向量变化（l 只改图片行）；真实数据普查无差异 | 是（§12 第 2、7 条；m 项见第 14 条） |
 | W3 | P3 | L1 数据格式修正（§3.5.2） | 两端要共用数据 | 向量差异只在声明的情形；真实数据普查的每一处变化都要你签字 | 是（§12 第 3 条） |
-| W4a | P6 | `src/UI/Rules.cs`：约 50 个纯静态函数从 Desk、CardWindow、HubWindow、Flyout、ManageWindow 移出，实例字段改为参数；`Layout.cs` 增加 `Trim`、`Spot`、`HubRect`。方法体内的字面量表（设置页选项 ManageWindow.cs:191-202、只定位不运行的扩展名 Desk.cs:765、菜单和图标 Desk.cs:1293-1351、提醒预设标签 CardWindow.xaml.cs:528-529）逐字节搬成具名静态成员。另加一个提交从 `Llm.Ask`（Llm.cs:195-217）抽出 `Llm.PreparePrompt(tool, prompt)`（gemini/qwen 的 `@` 转义、ollama 缺模型的报错）和 `Llm.Outcome(code, out, err)`（去 ANSI、Tail 300、“退出码 N，没有输出”、StripFence）。每个源文件一个提交。Rules.cs 不依赖 Desk、CardWindow 等窗口类型，加进测试项目的 Compile | 桌面规则的基准 | 移动前先录下特征输出（只调用不经过 DoLayout、不显示窗口的代码，§5.14），移动后必须重现；屏幕外快照不变 | 否 |
+| W4a | P6 | `src/UI/Rules.cs`：约 50 个纯静态函数从 Desk、CardWindow、HubWindow、Flyout、ManageWindow 移出，实例字段改为参数；`Layout.cs` 增加 `Trim`、`Spot`、`HubRect`。方法体内的字面量表（设置页选项 ManageWindow.cs:191-202、只定位不运行的扩展名 Desk.cs:765、菜单和图标 Desk.cs:1293-1351、提醒预设标签 CardWindow.xaml.cs:528-529）逐字节搬成具名静态成员。另加一个提交从 `Llm.Ask`（Llm.cs:195-217）抽出 `Llm.PreparePrompt(tool, prompt)`（gemini/qwen 的 `@` 转义、ollama 缺模型的报错）和 `Llm.Outcome(code, out, err)`（去 ANSI、Tail 300、“退出码 N，没有输出”、StripFence）；执行器文件落地后，`@` 转义和缺模型的报错改由执行器的 `promptEscapes`、`requiresModel` 驱动，C# 实现时已经是独立纯函数的部分不再单独提交。每个源文件一个提交。Rules.cs 不依赖 Desk、CardWindow 等窗口类型，加进测试项目的 Compile | 桌面规则的基准 | 移动前先录下特征输出（只调用不经过 DoLayout、不显示窗口的代码，§5.14），移动后必须重现；屏幕外快照不变 | 否 |
 | W4b | P6 | `LayoutPass.Compute`（纯函数）从 Desk.cs:798-870、882-892 抽出，**影子模式**：旧的 DoLayout 仍然生效，新旧不一致时写入 `shadow.log`。LayoutPass 只依赖 Core、Layout 和 Native 里的几何类型，加进 `tests/PinCC.Tests.csproj` 的 Compile，供向量生成器调用 | 布局的基准 | 你日常使用 10 天，影子日志为零差异后再切换（P12） | 是（§12 第 6 条） |
 | W4c | P6 | `PINCC_TRACE=<文件>` 录制器：在 Desk 的公开命令入口记录输入（含完整正文）、存储效果、撤销栈、布局输出、提醒批次，以及每次批量命令和每次布局时 `_cards` 的枚举顺序。开始录制时先把数据库 `VACUUM INTO` 一份起始快照。由你用 `setx PINCC_TRACE %LOCALAPPDATA%\PinCC-trace\trace.jsonl` 打开、重启 PinCC 后生效；文件不在数据目录里，不进备份和导出；按天分文件，总大小上限 50 MB；P12 之后 `setx PINCC_TRACE ""` 关闭。默认关闭 | 桌面编排的真实使用证据（§5.10） | 只记录，不改变行为 | 是（§12 第 6 条） |
 | W4d | P12 | LayoutPass 的输入和批量命令（Tile、CollapseAll、PinScreen 等遍历 `_cards.Values` 的地方）改为按 Id 排序 | 让推开重叠卡片和批量操作的记录顺序可以复现，Swift 不必模拟 .NET Dictionary 的内部顺序 | 声明的行为变化，有向量；影子模式切换之后单独提交 | 是（§12 第 6 条） |
 | W5 | P11 | Cli.cs 增加 `export`、`import` 两个命令（§4.4.1）；GUI 启动时另建一个按数据目录命名的互斥量 `Local\PinCC.Home.<哈希>`；`Cli.GuiRunning` 判断接缝 | L2a | 现有 CLI 录制除 `help`（Cli.cs:315-349 增加命令说明）和未知命令提示（Cli.cs:36 的命令列表）外不变，这两处变化写进提交说明；新命令有新录制 | 是（§12 第 5 条） |
 
-除此之外 src/ 不改。Windows 界面的样式不动。Program.cs 不增加任何环境变量的读取（测试直接在进程内设置 `When.Clock` 和 `Cli.GuiRunning`，见 §5.3、§4.4.1）。唯一新增的环境变量是 W4c 录制器的 `PINCC_TRACE`，由 Desk 读取，默认关闭。
+除此之外 src/ 不改。Windows 界面的样式不动。Program.cs 不增加任何环境变量的读取（测试直接在进程内设置 `When.Clock` 和 `Cli.GuiRunning`，见 §5.3、§4.4.1）。唯一新增的环境变量是 W4c 录制器的 `PINCC_TRACE`，由 Desk 读取，默认关闭。（执行器和技能功能自己的运行契约另有 `PINCC_GROUP` 等变量，CLI 会读 `PINCC_GROUP`，见 §4.2.10；那是功能本身，不是本计划的改动。）
 
 #### 3.5.1 W2 规范卫生（逐项提交）
 
@@ -303,7 +308,9 @@ PinCC.app/Contents/
 | `img/<sha1 前 20 位小写>.<扩展名>` | 卡片图片，按内容寻址 | 是 | 是，只增不删 |
 | `files/` | 下载的文档，按内容寻址 | 是 | 可选 |
 | `backup/pincc-YYYYMMDD.db` | 每日 `VACUUM INTO` 备份，保留 7 份 | 是：日期用不变区域的公历 | 可选 |
-| `edge/`、`llm/`、`error.log`、`shadow.log`、`.instance` | 前四项是 Windows 本机的渲染配置、LLM 工作目录和日志；`.instance` 是 Mac GUI 持有 flock 的单实例锁文件 | 否 | 不搬。Mac 只在数据目录里建 `.instance`（单实例和导入判断用，§4.4.1、§8.1），不建其余几项；Mac 的缓存和日志在 `~/Library` 下 |
+| `agents/<名字>.json`、`skills/<名字>/SKILL.md` | 用户的执行器和技能，同名时覆盖内置（§4.2.10） | 是：同一文件格式 | 可以复制；`where` 为 windows/wsl 的取数步骤在 Mac 上不能运行（§1.4）；是否进 `export` 包见 §12 第 15 条 |
+| `runs.log` | 技能运行记录，每行一个 JSON（§4.2.10） | 是：同一行格式，GUI 和 CLI 都追加 | 不搬（本机的记录） |
+| `edge/`、`llm/`、`error.log`、`shadow.log`、`.instance` | 前四项是 Windows 本机的渲染配置、LLM 工作目录和日志；`.instance` 是 Mac GUI 持有 flock 的单实例锁文件 | 否 | 不搬。Mac 在数据目录里只建 `.instance`（单实例和导入判断用，§4.4.1、§8.1）和上面两行的 `agents/`、`skills/`、`runs.log`，不建其余几项；Mac 的缓存和日志在 `~/Library` 下 |
 
 数据目录的位置：Windows `%LOCALAPPDATA%\PinCC`，Mac 正式版 `~/Library/Application Support/PinCC`、开发版 `~/Library/Application Support/PinCC.dev`（§8.16），两端都可以用 `PINCC_HOME` 覆盖（非空；相对路径按当前目录解析）。Swift 里只有 `Home.resolve()` 一个函数能决定数据目录，GUI、CLI、抓取的下载目录、LLM 的工作目录都用它；lint 禁止在别处拼数据目录（§5.13）。Mac 版 v1 不提供“移动数据目录”的界面选项，避免 GUI 和 `pincc` 看到不同的数据库。
 
@@ -336,19 +343,21 @@ PinCC.app/Contents/
 
 - `before` 是 Card 快照，写法同 System.Text.Json 默认：21 个 PascalCase 键，按声明顺序，写出 null，与 C# 逐字节相同（`Card.ToJson`，Card.cs:98）。
 - `cols` 是逗号分隔的列名，按首次出现的顺序。新建和恢复时重新插入的记录写入时为 `''`；同一组随后对这张卡片的写入会把列并入这条记录（Store.cs:171-176），所以 before 为 NULL 的 `create`/`restore` 记录也可能有非空 cols（例如 Desk.cs:459-461：新建图片卡后同组写 w、h）。restore 对 before 为 NULL 的记录不看 cols。NULL 只出现在发布前的旧记录。
-- 操作名只来自共享表（`create edit done delete restore remind summary meta move resize view color tile`）。Mac 不得引入新的操作名。
+- 操作名只来自共享表（`create edit done delete restore remind summary meta move resize view color tile run`）。Mac 不得引入新的操作名。
+- `run` 是技能运行的**标记记录**（§4.2.10）：`card_id = 0`、`before = NULL`、`cols = ''`，只用来占一个组号，作为 `PINCC_GROUP` 交给模型。标记由 `Store.Reserve`（Store.cs）经 Journal 写入。Restore 跳过 `card_id = 0` 的记录，返回的卡片 id 列表里没有 0；`log` 照常列出它（`#0`，操作名“运行技能”）。CLI 在 `PINCC_GROUP = N` 且存在 grp = N 的 run 标记时（`Store.Join`，没有时间限制），用一个 Id 为 N、卡片表为空的 Group 写入，所以跨进程的写入各自成行、不合并 cols（照搬）；`add`、`set`、`rm`、`run` 都走这个判断（Cli.cs 的 `Begin`）。
 - 组号是这一组第一条记录的 id（AUTOINCREMENT）；`sqlite_sequence` 两端的推进方式相同，由操作脚本逐步检查（§5.5）。
 
 #### 4.2.4 settings：四个作用域
 
 | 作用域 | 键 | 规则 |
 |---|---|---|
-| 共享 | `color.mode`、`text.size`、`tile.gap`、`tile.corner`、`hub.corner`、`sound`、`retention.days`、`llm.auto`、`llm.prompt`、`data.features` | 两端读写同一个值。取值语法在 settings-schema.json 里声明，从 ManageWindow.cs:191-202 的选项导出：`color.mode` ∈ off/rotate/kind/tag；`text.size` ∈ 13/14/16/18（读取时接受 12–20 的小数，Desk.cs:74）；`tile.gap` ∈ 8/12/18（读取时用 `int.TryParse`，限制在 4–40）；`tile.corner`、`hub.corner` ∈ tl/tr/bl/br；`retention.days` ∈ 7/30/90/365；布尔键只写 `"1"`/`"0"`（Store.cs:323 只把 `"1"` 当真） |
+| 共享 | `color.mode`、`text.size`、`tile.gap`、`tile.corner`、`hub.corner`、`sound`、`retention.days`、`llm.auto`、`llm.prompt`、`data.features`、`skill.ok.<名字>`（作用域待 §12 第 15 条确认） | 两端读写同一个值。`skill.ok.<名字>` 的值是确认时 SKILL.md 内容的 `Card.Hash`（SHA-1 前 16 位大写十六进制，§4.2.10）。取值语法在 settings-schema.json 里声明，从 ManageWindow.cs:191-202 的选项导出：`color.mode` ∈ off/rotate/kind/tag；`text.size` ∈ 13/14/16/18（读取时接受 12–20 的小数，Desk.cs:74）；`tile.gap` ∈ 8/12/18（读取时用 `int.TryParse`，限制在 4–40）；`tile.corner`、`hub.corner` ∈ tl/tr/bl/br；`retention.days` ∈ 7/30/90/365；布尔键只写 `"1"`/`"0"`（Store.cs:323 只把 `"1"` 当真） |
 | 本机 | `backup.last`（名字不变，Store.cs:291）、`db.id`、`local.handoff` | 描述这一台电脑自己的状态：本机 backup/ 目录的最后备份日、本库的 id、上一次交接时的操作序号（§4.4.1）。导出时不写进包，导入时保留本机值。两台 Mac 之间也不共享 |
 | Windows 专有 | `hk.*`、`autostart`、`llm.where`、`llm.env`、`llm.distro`、`llm.custom`、`llm.tool`、`llm.model`、`llm.detected`、`top:<Windows 显示器 id>` | Mac 从不读写，没有例外：Windows 的工具可能装在 WSL 里（`llm.where=wsl`），或者是自定义命令（Llm.cs:115-116），在 Mac 上没有意义。Mac 首次运行时自己检测（§8.13） |
 | Mac 专有 | `mac.hk.*`、`mac.llm.tool`、`mac.llm.model`、`mac.llm.custom`、`mac.llm.env`、`mac.llm.detected`、`mac.autostart.asked`、`mac.statusitem`（1/0，菜单栏图标）、`mac.welcomed`（1/0，欢迎提示和剪贴板提示已显示过）、`top:mac:*` | Windows 不认识这些键，自然忽略，不需要改 Windows |
 
-- `llm.prompt` 的规则照搬 ManageWindow.cs:180：`Trim()` 后等于 `DefaultTemplate.Trim()` 就删除该键（恢复默认），否则**原样**存储，不做 CRLF 换 LF。这条规则在 W4a 里移进 `Rules.cs` 成为 `SettingsSchema.PromptToStore`，并有向量（CRLF、行尾空格、BOM）。
+- `llm.prompt` 的规则照搬 ManageWindow.cs:180：`Trim()` 后等于 `DefaultTemplate.Trim()` 就删除该键（恢复默认），否则**原样**存储，不做 CRLF 换 LF。这条规则在 W4a 里移进 `Rules.cs` 成为 `SettingsSchema.PromptToStore`，并有向量（CRLF、行尾空格、BOM）。执行器和技能落地后，`llm.prompt` 覆盖的是内置技能 `summary` 的正文（§4.2.10）。
+- `llm.tool`、`mac.llm.tool` 的值是执行器名：内置执行器、数据目录 `agents/` 里的文件名，或 `custom`。执行器文件本身两端共用，所以同一个用户执行器两端都能选；运行环境各自决定：Windows 由 `llm.where`、`llm.distro`、`llm.env`，Mac 只有本机，用登录 shell 的环境 `mac.llm.env`（§8.13）。
 - 值为 NULL 表示删除这一行；`''` 是另一个值，两者不能混用。
 - **共享设置的取值语法永不就地修改**：要改语法只能换一个新键名，旧键保留旧语法。原因：`SetSetting` 不检查只读（Store.cs:325-331），数据库因 `data.features` 或 `user_version` 只读时，旧版的 Desk（Desk.cs:157、191、709、934、1344）和设置页照样写设置，`data.features` 保护不了设置（§4.2.6）。另一种做法是让 `SetSetting` 在只读时拒绝写共享键，那是另一项 Windows 改动，本计划不采用。
 - Swift 的设置接口只提供带类型的写入函数（`setBool` 写 `"1"`/`"0"`，`setInt` 写十进制整数，枚举键只接受声明的值）。调试和测试构建里，设置访问经过一个守卫：检查作用域，也检查取值语法。
@@ -381,6 +390,13 @@ PinCC.app/Contents/
 - 两端的命令、参数、JSON 字段顺序、`--md`、退出码 0–4、`-` 表示读标准输入都相同，对任一端写的数据都成立。
 - 比较规则：输出统一把 CRLF 换成 LF，把数据目录替换成 `{HOME}`；命令名只在 `Cli.Cmd` 出现的位置替换成 `{CMD}`（W2h），产品名“PinCC”和正文里的同名文字不替换；图片路径分隔符只在 images 字段和 `![](…)` 行里替换成 `{SEP}`（Store.cs:315-316 把 `/` 换成本机分隔符）。替换之后 JSON 逐字节相同。
 - 图片行是否统一写成 `![](<路径>)`，沿用上一版计划的待决定事项（§12 第 7 条）；同意时由 W2l 在 P2 先改 C#，CLI 录制按新格式录。
+- **清单**（Cli.cs 的 `Changes`、`TaskNumbers`）：
+  - `add`、`set` 的 `--add-task <文字|->`：每个非空行一项，经 `Markdown.AddTasks` 加在最后一个任务及其子项之后；只有 `--add-task` 时 `add` 也不算“没有内容”。
+  - `set` 的 `--check N`、`--uncheck N`：第 N 个任务，从 1 起，可写 `1,3`，按 `NumberStyles.None` 解析；序号在写入事务里按当时的正文用 `Markdown.TaskLines` 计算（与进度的计数相同，围栏里的不算），越界时退出码 1，整条命令不写入。
+  - 一条命令里的应用顺序：正文（含 `--append`）→ 图片 → check → uncheck → add-task → 摘要。
+  - `show --json`、`list --json` 在 `progress` 之后新增 `tasks: [{n, done, text}]`，`text` 是任务行的原文，不去 Markdown。
+  - 标准输入一次命令只能读一次：正文、`--summary`、`--add-task` 只能有一个是 `-`。两处检查（Cli.cs 的 `Text` 和 `Changes`）的报错文案不同，哪一处先报取决于命令，都进录制（§5.8）。
+- **执行器和技能**（§4.2.10）：`skills [--json]`、`run <技能> [<卡片id>] [--json]`、`help --skill`。`help --skill` 输出的通用 SKILL.md 与 `Cli.Help` 一样拆成公共部分和命名的平台片段，命令名引用 `Cli.Cmd`（W2h 的做法）。输出里出现的 PinCC 可执行文件路径（`PINCC_EXE`、`pincc` 授权展开的前缀、`help --skill` 里的程序路径）比较前替换成 `{EXE}`。环境变量 `PINCC_GROUP` 让写入并入一次运行的操作组（§4.2.3）。`Cli.Help` 里 `skills` 一行写的 `skills\<名字>\SKILL.md`、`agents\<名字>.json`，以及一些报错（例如“可在 agents\{执行器}.json 的 grants 里补上”）用了 Windows 的 `\`，W2h 拆分时要放进平台片段或改用两端都认的写法。`skills --json` 的形状（`skills`、`runners`、`errors` 三个数组，技能的 `approved`）和 `run --json` 的形状（`skill`、`card`、`output`、`written`、`grp`、`result`）按 Cli.cs 逐字节相同。
 
 #### 4.2.9 WAL 和数据目录位置
 
@@ -392,6 +408,32 @@ PinCC.app/Contents/
   不用 `NSFileProviderManager` 列举同步域：它只返回调用方自己的 File Provider 扩展注册的域，拿不到 Dropbox、OneDrive 等其他程序的域；第三方同步盘由 `~/Library/CloudStorage/` 路径检查覆盖。
   命中任一项就显示警告，并链接到 DATA-MOVE.md。Windows 端的同样检查是可选的，放到以后。
 - 直接复制数据目录只能在所有 PinCC 进程都退出之后进行：最后一个连接关闭时会做检查点，把 WAL 合并进主文件；如果还有 `-wal`、`-shm`，必须一起复制。其他情况一律用 `export`。
+
+#### 4.2.10 执行器、技能与运行记录
+
+执行器（用哪个 LLM 命令行、怎样传参）和技能（取什么数据、用什么提示词、结果写到哪里）都是数据文件；代码只保留安全契约和执行管线，新 LLM、新流程只是新文件。C# 实现在 src/Core/Agents.cs（`BuiltinFiles`、`RunnerProfile`、`Runners`、`RunLog`）和 Skills.cs（`Skill`、`Skills`、`SkillRequest`、`SkillRun`），另有 Llm.cs（按执行器文件构造命令，`StepCommand` 运行取数步骤）、Store.cs（`Reserve`、`Join`）、Cli.cs、Desk.cs（`Ask`、`AutoRun`、`RunSkill`、`RunDeskSkill`、`Confirm`）和 ManageWindow.cs 的改动，测试在 tests/SkillTests.cs（75 项），仍在改动中；规则以 C# 代码和测试为准，下表只列两端必须一致的部分。这些格式在 Mac v1 之前进入 C#，属于基线格式，不需要 `data.features` 特性 id；以后再改，按 §4.2.6 和 §5.15 的“数据格式变化”处理。`data.features` 只保护 pincc.db 里的数据，保护不了这些文件：SKILL.md 顶层不认识的键被忽略（`when`、`context` 里不认识的键报错），执行器 JSON 不认识的属性也被忽略，所以以后只能新增“旧版忽略了也安全”的键，否则要让旧版解析失败。
+
+| 项 | 位置和格式 | 两端必须一致的地方 |
+|---|---|---|
+| 内置文件 | 仓库 `builtin/agents/*.json`、`builtin/skills/<名字>/SKILL.md`；Windows 作为嵌入资源 `builtin/…` 打进 exe（src/PinCC.csproj 的 EmbeddedResource），Mac 原样放进 `Contents/Resources/builtin/`，程序读嵌入的副本（§5.1） | 同一份文件，不经生成器改写；台账记整个目录的哈希（§5.11） |
+| 用户文件 | 数据目录 `agents/<名字>.json`、`skills/<名字>/SKILL.md`；同名时覆盖内置；解析失败的文件不生效，错误显示在设置页“技能与执行器”一节和 `skills` 的输出里；桌面程序每 5 秒按文件夹签名（名字、大小、修改时间）检查一次，变了就重新载入 | 覆盖规则；载入顺序（内置按路径序数，再用户文件按路径序数）；错误文案（进 CLI 录制） |
+| 执行器 | JSON（属性名不分大小写，允许注释和结尾逗号，不认识的属性忽略，与 Card 快照的严格读取不同）：`name`（等于文件名，`^[a-z0-9][a-z0-9._-]{0,31}$`，`custom` 保留）、`label`、`command`（默认等于 name，`^[\w .:\\/+-]{1,260}$`）、`priority`（检测顺序，小的在前，默认 100；内置 claude 10、codex 20、gemini 30、qwen 40、llm 50、ollama 60）、`args`（`{grants}`、`{model}` 必须是完整元素，各最多一次）、`model`（必须含 `{value}`；缺省或 `[]` 表示不支持模型）、`requiresModel`、`listModels`、`grants`（只能是 `none`、`web`、`read`、`shell`；`{prefix}` 只能出现在 shell 里且必须出现）、`promptEscapes` | `RunnerProfile.Parse` 的全部校验和报错；列表和首次检测的顺序按 priority、再按名字（序数），用户执行器也参与；授权展开（`Llm.Tokens`：没有授权或只有 none 时用 `none` 的参数，缺省为空；否则按顺序拼接各授权的参数，shell 的 `{prefix}` 换成前缀）；前缀校验 `^[\w .+/\\:=@,~-]{1,200}$`；模型名校验；内置 6 个与原 `Llm.Table` 的参数逐项相同；`custom` 只支持 `none` |
+| 技能 | SKILL.md（先把 CRLF 换成 LF、去掉 BOM）：以 `---` 行开始，到下一个单独的 `---` 行为止是元数据：每行 `键: 值`（`^([A-Za-z][\w-]*):\s?(.*)$`），`#` 开头的行是注释，缩进的行接在上一个键后面（跨行 JSON），重复的键取最后一个，不认识的顶层键（例如别的 agent 的 `license`、`allowed-tools`）忽略；值以 `"` 包围时按 JSON 字符串读，以 `'` 包围时 `''` 表示一个 `'`，其余原样去空白；之后的正文（去掉首尾换行）是提示词模板，不能为空。键：`name`（等于文件夹名）、`label`（显示名，默认等于 name）、`description`、`when`（JSON 对象：`src`、`kind`、`ext`、`tag`、`scope`、`on`）、`context`（JSON 数组：`{run, where, timeout}` 或 `{builtin}`）、`grants`（JSON 数组或单个值）、`runner`、`output` | `Skill.Parse` 的全部校验和报错（`timeout` 1–600、`where` 取 runner / windows / wsl、desk 范围的 output 只能是 cards 或 none 等）；缺省值（card 范围 context 为 `[note]`、output 为 summary，desk 范围为 `[desk]`、cards；`on` 默认 `["ask"]`）；`ext` 自动补前导点，`tag` 去掉 `#` |
+| 选择 | `Skills.For`、`Best`：`src` 通配符（`*` 任意，整串匹配，不分大小写，按不变区域）对卡片的 Src；`ext` 对文件路径或网址路径的扩展名（OrdinalIgnoreCase）；`tag` 对正文里的 `#tag`（运行时拼出的正则，§5.4） | 具体度（src 4 + ext 3 + tag 2 + kind 1），同分时用户技能在前，再按名字；✨ 用具体度最高、`on` 含 ask 或 create 的那个（`Skills.Best`），它的 `on` 不含 ask 时卡片上不显示 ✨、菜单里也没有这一项（`Desk.Ask` 这时退回 summary，只有失败后的“重试”会走到）；✨ 的文案是“✨ 摘要”（内置 summary）或“✨ <label>”；自动运行只在它的 `on` 含 create、output 是 summary、卡片没有摘要或摘要已过时时进行，内置 summary 仍受 `llm.auto` 和隐私守卫（只自动读公网地址）约束，用户技能必须已确认；其他输出只能由 ✨ 或菜单触发；新建和来源变化时检查一次，笔记卡片保存后也检查一次（给按 `#标签` 等匹配笔记的自动技能用）；卡片菜单“技能 ›”列出其余匹配的 card 技能，+ 的菜单列出 desk 技能 |
+| 运行确认 | 设置 `skill.ok.<名字>` = `Card.Hash(规范化后的 SKILL.md 全文)`，即 UTF-8 上 SHA-1 的前 16 位**大写**十六进制；只有含 run 步骤或 `none` 以外授权的**用户**技能需要；内容变了要重新确认；未确认的技能不自动运行；只在你点 ✨ 或菜单时询问；CLI `run` 不需要确认 | 哈希输入就是 `Skill.Text`（CRLF 已换成 LF、BOM 已去掉）；作用域见 §4.2.4 和 §12 第 15 条 |
+| 操作组标记 | ops 里的 `run` 记录（§4.2.3），只在需要 `pincc` 授权时写 | 并组的条件；输出写回记在同一组 |
+| 运行记录 | 数据目录 `runs.log`，每次调用模型后追加一行 JSON（紧凑、UnsafeRelaxed、写出 null）：`at`（本地时间 `yyyy-MM-ddTHH:mm:ss`，不带时区）、`skill`、`card`（桌面技能为 null）、`runner`、`grants`（展开后的授权，`pincc` 已换成 `shell:<PinCC 路径>`）、`ms`、`code`（0 或 1）、`error`；取数步骤失败、自动运行没有可读内容时不记。文件超过 1,000,000 字节时只保留最后 500 行；写失败不影响运行 | 字段和 JSON 写法；截断时 C# 用 `File.WriteAllLines`，Windows 上被保留的行变成 CRLF 结尾，读的一方两种行尾都要接受 |
+
+**运行管线和契约**（`SkillRun.Run`、`Apply`，两端写死在代码里，不在文件里）：
+- 执行器：技能的 `runner` 与设置里的不同时，用这个名字加同一个运行环境构造，设置里的模型只在同一个执行器时沿用；需要的授权执行器不支持时报错。
+- 取数步骤依次执行，非空的输出以空行相隔拼成 `{content}`。`run` 的参数里 `{src}` `{file}` `{dir}` `{card}` `{title}` 可以是参数的一部分，替换后仍是一个参数，不经 shell；输出为空也算失败（沿用 `Llm.Execute` 的“退出码 N，没有输出”），失败文案是“<程序> 失败：…”；取数步骤不占模型的 2 个并发名额。`builtin: source` 就是原来摘要的读取规则（正文过少时让模型用 read 或 web 授权自己读，卡片备注附在后面）。
+- 提示词只走标准输入。用户数据从不进入 shell 文本，只作为独立参数或环境变量。提示词模板的占位符在原来 5 个之外加 `{card}`、`{note}`；设置 `llm.prompt` 只覆盖内置 `summary` 的正文；有 `pincc` 授权时在提示词末尾附一段说明（`PinccNote`），要求每条命令以 PinCC 的完整路径开头（权限只放行这个前缀），不用变量或别名。
+- 模型和每个取数步骤都带 `PINCC_SKILL`、`PINCC_EXE`（PinCC 在该环境里的路径），有卡片时带 `PINCC_CARD`、`PINCC_SRC`（文件卡片是路径），有文档时带 `PINCC_FILE`、`PINCC_DIR`，进程环境里有 `PINCC_HOME` 时带上它，有 `pincc` 授权时带 `PINCC_GROUP`。名字不合 `^PINCC_[A-Z_]{1,32}$`、值含控制字符或长于 8000 的变量被丢弃。Windows 进 WSL 时把路径转成 `/mnt/…`，并用 `WSLENV` 让 WSL 里调用的 PinCC.exe 看到 `PINCC_GROUP`、`PINCC_HOME`；Mac 的路径本来就是 POSIX，直接合并进子进程环境（§8.13）。
+- 超时（模型 150 秒，WSL 180 秒只属于 Windows；取数步骤默认 60 秒）、结束整棵进程树、模型全局最多 2 个并发，沿用原机制。
+- 写回：summary 只在卡片的 Src 和 InputHash 都没变时写（操作名 summary，同时写 SumHash）；append 是 `(正文.TrimEnd() + "\n\n" + 结果.Trim()).Trim()`（操作名 edit）；cards 按只含 `---`（前后可有空格、制表符）的行切分，每段去空白后新建一张卡片；none 不写，桌面程序提示结果的第一行。
+- 一次运行 = 一个操作组：需要 `pincc` 授权时先写 run 标记取得组号；写回在同一组；你点 ✨ 或菜单、或有 `pincc` 授权时这一组进撤销栈，撤销它就撤销整次运行，包括模型经 CLI 做的写入。
+
+纯函数的部分（解析、校验、选择、授权展开、提示词构造、环境变量表、确认哈希、runs.log 的一行、cards 的切分）进 §5.3 的向量；标记、并组和写回进 §5.5 的操作脚本和 §5.8 的 CLI 录制。
 
 ### 4.3 双向互开怎样验证
 
@@ -415,7 +457,7 @@ PinCC.app/Contents/
 - **包格式是一个 SQLite 文件**（Foundation 没有 zip 写入器；SQLite 文件是原子的，还能用 `integrity_check` 校验）：
   - cards、ops、settings、sqlite_sequence，建表语句与 `contracts/tables/schema.sql` 相同；
   - `bundle_meta(format, user_version, db_id, platform, exported_at, data_features)`，`db_id` 是导出方本机的 `db.id`；
-  - `bundle_files(path, data, mtime)`：img/ 的全部文件，files/ 只在 `--with-files` 时附带。
+  - `bundle_files(path, data, mtime)`：img/ 的全部文件，files/ 只在 `--with-files` 时附带。用户的 `agents/`、`skills/` 是否也放进来由 §12 第 15 条决定；`runs.log` 不放。
 - **包不直接用 `VACUUM INTO` 生成**：新建包文件，执行建表语句，`ATTACH` 当前库，逐表 `INSERT … SELECT`；cards、ops 插入之后执行 `DELETE FROM sqlite_sequence; INSERT INTO sqlite_sequence SELECT name, seq FROM src.sqlite_sequence`，因为插入只会把序列设为现有的最大 id，而源库在删除最新的卡片或操作记录（Forget、Purge）后序列更高（有专门的测试比较两边的 sqlite_sequence）。settings 在 SELECT 时就过滤掉 `secret: true` 的键（`--include-secrets` 时不过滤）和“本机”作用域的键。这样被排除的值从来没有写进包文件；如果先复制再 DELETE，旧值会留在 SQLite 的空闲页里（secure_delete 默认关闭，而且取决于编译参数，winsqlite3 和 macOS 的系统 SQLite 未必相同）。
 - **敏感设置默认不导出**（settings-schema.json 里 `secret: true` 的键）。`--include-secrets` 才导出，并显示警告。导入时从不覆盖本机的敏感设置。包文件常常会经过云盘或聊天工具，里面不应该有 API 密钥。
 - **GUI 在运行时拒绝导入**，提示“请先退出 PinCC”。判断按数据目录进行，两端规则一致：
@@ -423,7 +465,7 @@ PinCC.app/Contents/
   - 判断经一个进程内接缝 `Cli.GuiRunning`，做法与 `When.Clock` 相同：静态委托，生产默认只调用 `Mutex.TryOpenExisting` 检查上面的按目录名字，只打开、不发信号。C# 测试、CLI 录制和交替读写在进程内替换这个委托，固定“GUI 在运行 / 不在运行”两种情况；测试从不创建、也不打开真实的互斥量，这样录制结果不依赖真实会话的状态；尤其绝不创建 `Local\PinCC.Instance`，否则你的 PinCC 在测试期间启动时会以为已有实例而直接退出（Program.cs:24-29）。
   - Mac：GUI 对数据目录里的 `.instance` 持有 flock，`import` 取不到锁就拒绝；Swift 测试同样经接缝注入。
   原因：运行中的 GUI 在内存里有撤销栈的组号、正在编辑的会话（op id 和 rev）、撤销条的闭包，以及按 id 和 rev 管理的卡片窗口（Desk.cs:27、39、219-224、491，CardWindow.xaml.cs:27、167-175）。导入替换数据后，同一个 id 可能是另一张卡片、rev 可能碰巧相同，自动保存会把旧卡片的正文写进导入的卡片，Ctrl+Z 会恢复另一台电脑的操作组。要支持在 GUI 运行时导入，需要 Desk 在检测到“数据代次”变化时整体重置（结束编辑、清空撤销栈、关闭并重建所有窗口、重读设置），那是另一项 Windows 改动，不在 v1 里。
-- **交接检查**：`import --replace` 会整体替换本机数据。为了不悄悄丢掉这台电脑上还没导出的修改，每次 export 和 import 成功后，本机在“本机”作用域的 `local.handoff` 里记下当时 ops 的 `sqlite_sequence`。`import --replace` 之前比较：本机的 ops 序号超过记下的值（交接之后又有进历史的修改），或者本机有卡片却没有这条记录，就拒绝并提示“这台电脑上有还没导出的修改”，加 `--force` 才覆盖。只写 meta 的 `journal:false` 写入不产生 ops，不算修改。推荐用法写成“交接”：离开一台电脑前先 export，到另一台再 import --replace，同一时间只在一台电脑上改卡片。
+- **交接检查**：`import --replace` 会整体替换本机数据。为了不悄悄丢掉这台电脑上还没导出的修改，每次 export 和 import 成功后，本机在“本机”作用域的 `local.handoff` 里记下当时 ops 的 `sqlite_sequence`。`import --replace` 之前比较：本机的 ops 序号超过记下的值（交接之后又有进历史的修改），或者本机有卡片却没有这条记录，就拒绝并提示“这台电脑上有还没导出的修改”，加 `--force` 才覆盖。只写 meta 的 `journal:false` 写入不产生 ops，不算修改；技能运行的 run 标记是一条 ops，即使这次运行什么也没写，也会算作修改（照 C#，见 §12 第 15 条的附带问题）。推荐用法写成“交接”：离开一台电脑前先 export，到另一台再 import --replace，同一时间只在一台电脑上改卡片。
 - `import --replace` 的步骤：
   1. 包的 `user_version` 或 `data_features` 比本机新时拒绝；GUI 在运行时拒绝；交接检查不通过且没有 `--force` 时拒绝；
   2. 把当前数据库备份到 `backup/pincc-YYYYMMDD-import-HHmmss.db`。这个名字仍匹配 Store.cs:298 的 `pincc-*.db`，参与保留 7 份的轮换；不用每日备份的名字，因为同一天的 `Store.Backup()` 会先删除同名文件（Store.cs:295-296）；
@@ -496,15 +538,16 @@ PinCC.app/Contents/
 
 ### 5.1 单一来源的数据表
 
-- **内容**：调色板（9 色 × 名称和 Back/Strip/Accent/Ink）、自动轮换顺序（Card.cs:193）、卡片列顺序、建表语句、操作名和中文标签、LLM 工具表、默认提示词模板、CLI 帮助（公共部分和命名的平台片段）、热键动作 / 默认值 / 已知冲突、提醒预设的标签、Metrics、正则清单、图标映射、菜单规格。评审补充的几张也在内：`Desk.Readable`（哪些扩展名自动交给 LLM，Desk.cs:265-272）、`ClipData.ImageExts`（ClipData.cs:12）、只定位不运行的扩展名表（Desk.cs:765）、设置页的选项集合（ManageWindow.cs:191-202）、CLI 的参数表（Cli.cs:16-28）。
+- **内容**：调色板（9 色 × 名称和 Back/Strip/Accent/Ink）、自动轮换顺序（Card.cs:193）、卡片列顺序、建表语句、操作名和中文标签、LLM 工具表（执行器文件落地后由 `builtin/` 代替，见下）、默认提示词模板、CLI 帮助（公共部分和命名的平台片段，含 `help --skill` 的 SKILL.md）、热键动作 / 默认值 / 已知冲突、提醒预设的标签、Metrics、正则清单、图标映射、菜单规格。评审补充的几张也在内：`Desk.Readable`（哪些扩展名自动交给 LLM，Desk.cs:265-272）、`ClipData.ImageExts`（ClipData.cs:12）、只定位不运行的扩展名表（Desk.cs:765）、设置页的选项集合（ManageWindow.cs:191-202）、CLI 的参数表（Cli.cs:16-28）。
 - **做法**：测试项目今天只编译 src/Core 和 UI 里的 Layout.cs、Native.cs（tests/PinCC.Tests.csproj:14-15），所以表按来源分三处导出，都写成 `contracts/tables/*.json`：
-  - **Core 的表**（`Card.Rotation`、`Store.Schema`、`Llm.Table`、`Cli.Help`、`Cli.Options`、`Cli.Cmd`、每个 `[GeneratedRegex]` 的模式和选项）：由 `tests/Vectors/Tables.cs` 反射读取；
+  - **Core 的表**（`Card.Rotation`、`Store.Schema`、`Llm.Table`（执行器文件落地后不再有）、`Cli.Help`、`Cli.Options`、`Cli.Cmd`、每个 `[GeneratedRegex]` 的模式和选项）：由 `tests/Vectors/Tables.cs` 反射读取；
   - **UI 里不依赖窗口的表**（`Hotkeys.Actions/Known`、`Palette.All`、`ClipData.ImageExts`）：P1 在 `tests/PinCC.Tests.csproj` 里显式加入 Hotkeys.cs、Palette.cs、ClipData.cs 三个文件（只改 tests/），由 Tables.cs 读取；
   - **依赖窗口的表**（`Desk.Readable`、菜单规格和图标）：由 OracleWpf 导出，它编译全部 src/。
   - **不是成员的表**：设置页的选项（ManageWindow.cs:191-202 的 `Segments(...)` 参数）、只定位不运行的扩展名（Desk.cs:765 的 `is ".exe" or …` 模式）、菜单和图标字形（Desk.cs:1293-1351）、提醒预设标签（When.cs:16-23、CardWindow.xaml.cs:528-529）反射读不到。P1 先用一个词法抽取器从源码抽出，台账记这几段源码的哈希；W4a 把它们逐字节搬成具名静态成员之后，改为反射读取。
   `tools/gen-swift-tables.sh` 把 JSON 生成 `mac/Sources/*/Generated/*.swift`；一个 Swift 测试在内存里重新生成并比较，所以手改生成文件会失败。
 - **常量**：CardWindow.xaml.cs:22 的 `PillH`、`Thumb`、`MinW`、`MinH`、`RowH`、`PadTop` 已经是公开常量，直接导出。真正内联在 WPF 代码里的数字（0.6、26、+3、1.45、1.5、72/52 等）在 W4a 里成为 `Rules.cs` 的具名常量，同样导出。XAML 里的度量（CardWindow.xaml 的圆角、边距、行高）不是 C# 成员，由台账的整文件哈希跟踪（§5.11）。
 - **集合字面量扫描**：一个 C# 源码扫描列出 src/ 里所有字符串数组、集合字面量、`is "…" or "…"` 模式和 switch 的字符串分支（例如 Desk.cs:765、Cli.cs:212、Fetch.cs:197、420，ManageWindow.cs:381，Native.cs:282），每一个都必须已经导出，或在白名单里注明“只属于 Windows”及原因。
+- **内置执行器和技能**：`builtin/` 下的文件本身就是单一来源，不经 Tables.cs 导出，也不是 C# 成员。`tools/gen-swift-tables.sh` 把它们逐字节生成为可移植目标里的字面量，所以 WSL 测试和 `Helpers/pincc` 都不必找 .app 的 Resources（`pincc` 经 `~/.local/bin` 的符号链接调用时看不到 bundle，§3.3）；bundle.sh 另把原文件复制进 `Contents/Resources/builtin/`，给你查看和复制做模板。一个测试比较仓库、生成的字面量和 .app 里的副本三者的哈希。
 - **Mac 专有的行**（PlatformText、KeyBindings.Mac、KnownConflicts.Mac、SF Symbol 名）放在 `contracts/tables/mac-*.json`。完整性测试检查：每个命令、图标、平台用词都有两端的对应，或明确标为“无”。
 
 Metrics 当前的值（以 C# 为准，此表只供对照；来自上一版 §5.1 的梳理）：
@@ -543,7 +586,11 @@ Metrics 当前的值（以 C# 为准，此表只供对照；来自上一版 §5.
 
 ### 5.3 纯函数测试向量
 
-- **覆盖**：Card 的派生状态、Hash、FNV、Tag、AutoColor；When 的 Parse、Presets、Format；Markdown 全家；Card 和 CardMeta 的 JSON 字节与宽容读取；TextDecode；FromHtml、MainText、JsonLd；UrlGuard；Host；WinPath；HtmlDecode；Llm 的 Tokens、Prompt、StripFence、Ansi；Cli 的 Split、OpFor、ImageExt、Line、Md、Dto、Iso；Fetch 的 Cap 和 Snippet；一个固定文件夹上的文件信息；W4a 之后每个 Rules 函数。
+- **覆盖**：Card 的派生状态、Hash、FNV、Tag、AutoColor；When 的 Parse、Presets、Format；Markdown 全家；Card 和 CardMeta 的 JSON 字节与宽容读取；TextDecode；FromHtml、MainText、JsonLd；UrlGuard；Host；WinPath；HtmlDecode；Llm 的 Tokens、Prompt、StripFence、Ansi；Cli 的 Split、OpFor、ImageExt、Line、Md、Dto、Iso、TaskNumbers；Fetch 的 Cap 和 Snippet；一个固定文件夹上的文件信息；W4a 之后每个 Rules 函数。
+- **新增的族**（2026-09 起 C# 新增的功能）：
+  - 清单：Markdown 的 AddTasks、SetTask、TaskLines、FoldDone，Card 的 NextTask、TitleIsTask。tests/Program.cs 里已有的用例（AddTasks 9 条、TaskLines、SetTask 4 条、FoldDone 3 条、NextTask 和 TitleIsTask 8 条）作为这几族的种子，语料再加上围栏、CRLF、嵌套子项、`*`/`+` 列表符号、全角空格、只有列表符号的空项；
+  - 执行器和技能（§4.2.10）：执行器 JSON 和 SKILL.md 的解析与校验（合法、非法、边界各一批，含跨行的 JSON 值、重复键、未知键、名字与文件名不符）、`when` 匹配和具体度、选择 ✨ 和自动运行的技能、授权翻译和参数展开、提示词构造（占位符单遍替换、围栏中和、自动追加 `<document>`）、环境变量表、确认哈希、运行记录的一行、cards 的切分；种子取 tests/SkillTests.cs 的 75 项里的纯函数用例；
+  - + 贴图：ClipIngest 的图片判断（ClipData.cs 的 `Pictures`：先看文件，文件全是图片才算；否则有非空白文字就不算；否则取位图），输入是 ClipPayload。
 - **命令**：`dotnet.exe run --project tests -- vectors contracts/vectors [--expect 族名…]`。生成器进程固定 `CultureInfo` 为 zh-CN。
 - **时间和时区**：
   - 测试进程在进程内设置 `When.Clock`（固定的 UTC 时刻），生产程序不读任何环境变量；
@@ -570,6 +617,7 @@ Metrics 当前的值（以 C# 为准，此表只供对照；来自上一版 §5.
   - Fetch.cs:570：插入代码给定的属性名（property、name、itemprop、content，Fetch.cs:137-138）；
   - Fetch.cs:471：插入从 HTML 里取到的标签名，即 468 行 `<(\w+)` 的分组；.NET 的 `\w` 含非 ASCII 字母。
   它们和 `Element()`、`Attr()` 一起在 Swift 里写成手写扫描器，并有含非 ASCII 标签名的向量。
+  技能又加了两处，模式来自你写的技能文件（Skills.cs）：`when.src` 的通配符（`Regex.Escape` 后把 `\*` 换成 `.*`，整串匹配，IgnoreCase | CultureInvariant）和 `when.tag`（`(?:^|\s)#` + `Regex.Escape(tag)` + `(?![\p{L}\p{N}_\-])`，IgnoreCase 但**没有** CultureInvariant，按当前区域比较大小写，W2 可以统一）。Swift 同样写成手写匹配器，向量覆盖多个 `*`、正则元字符、非 ASCII 和大小写。它们也让内联 `Regex` 调用的行数和 `[GeneratedRegex]` 的个数变了（清单、ItemPrefixRx、Agents/Skills/Llm 的新正则），源码扫描门槛的数字以重新生成时为准。
 - **每个 Swift 对应物带一个标记和模式哈希**，二选一：
   1. 基于 `[UInt16]` 和 .NET 字符表的手写扫描器。优先用于 Card 和 Markdown 的 TagRx、PathRx、Markdown 块分类、TimeRx、EnvLineRx，以及 HTML 的惰性块模式（JunkRx、ChromeRx、FormRx、Article、Main、Body），这些要重现最左优先的配对。
   2. `NetRegex`（NSString 上的 NSRegularExpression），按机械规则翻译：
@@ -585,8 +633,8 @@ Metrics 当前的值（以 C# 为准，此表只供对照；来自上一版 §5.
 
 ### 5.5 操作脚本差分测试（存储层）
 
-- **保证**：存储层的有状态语义相同。每一步之后的每一行、rev、历史记录、cols 顺序、组号、`sqlite_sequence`、图片文件集合、`data_version` 的副作用都相同。覆盖：打开和迁移、只读闸门、Insert / Mutate / Write / Journal / InTx 回滚、ifRev、`journal:false`、第二个并发连接、Restore 的所有分支、Forget、Purge（带文件修改时间）、Backup 保留、设置、SaveImage、CLI 命令。
-- **脚本格式**（`contracts/scripts/*.json`）：`open(conn, busyMs)`、`clock(ms)`、`begin(g)`、`insert`、`mutate(id, set:{列:值}, op, ifRev, journal)`、`restore(grp)`、`forget`、`purge(days)`、`backup`、`setting`、`saveImage(b64, ext)`、`touchImg(name, mtime)`、`cli(argv, stdin b64)`、`close`、`reopen`、`failNext`（临时触发器）、`rawText(id, 列, 十六进制字节)`（用 `CAST(X'…' AS TEXT)` 写入非法 UTF-8），以及交替执行用的 `impl:cs|swift` 分段标记。
+- **保证**：存储层的有状态语义相同。每一步之后的每一行、rev、历史记录、cols 顺序、组号、`sqlite_sequence`、图片文件集合、`data_version` 的副作用都相同。覆盖：打开和迁移、只读闸门、Insert / Mutate / Write / Journal / InTx 回滚、ifRev、`journal:false`、第二个并发连接、Restore 的所有分支、Forget、Purge（带文件修改时间）、Backup 保留、设置、SaveImage、CLI 命令，以及技能运行的 run 标记和并组（标记存在、不存在、组号指向的不是 run 标记三种；撤销整个运行组时标记无操作）。
+- **脚本格式**（`contracts/scripts/*.json`）：`open(conn, busyMs)`、`clock(ms)`、`begin(g)`、`insert`、`mutate(id, set:{列:值}, op, ifRev, journal)`、`restore(grp)`、`forget`、`purge(days)`、`backup`、`setting`、`saveImage(b64, ext)`、`touchImg(name, mtime)`、`runMark()`（写 run 标记，返回组号）、`cli(argv, stdin b64, env)`（env 目前只有 `PINCC_GROUP`）、`close`、`reopen`、`failNext`（临时触发器）、`rawText(id, 列, 十六进制字节)`（用 `CAST(X'…' AS TEXT)` 写入非法 UTF-8），以及交替执行用的 `impl:cs|swift` 分段标记。
 - **规范转储**：两端用同一个 dump.sql，由宿主代码打印成 `{typeof, 整数十进制 | 实数 IEEE 位的十六进制 | 文本 UTF-8 十六进制 | blob 十六进制}`，不用 `quote()`（不同 SQLite 版本的 REAL 文本格式不同）。另外每行打印经 UTF-16 接口读回的文本的十六进制、`Card.Hash(Body)` 和 `InputHash`，这样非法文本在两端解码后的差异也能看到。转储还包括 `PRAGMA encoding`、`user_version`、`journal_mode`、`sqlite_master` 的 SQL 文本、`sqlite_sequence`、img/ 文件列表和 `data_version` 的变化量。
 - **驱动**：C# 的 `tests/Oracle/ScriptDriver.cs` 调用公开的 Store/Cli 接口；Swift 的 ScriptReplayTests 和 `pincc-oracle` 调用 PinCCCore。
 - **随机脚本**：SplitMix64 种子，默认 300 个种子 × 60 步，`--deep` 5,000 个。卡片字段取自一个语料：CRLF、NUL、emoji、NFD、中日韩文字、`/`、引号，以及 0.1、−0.0、80.8 这样的双精度数；操作种类按权重抽取，包括两个连接交错和 ifRev 冲突。
@@ -614,7 +662,10 @@ Metrics 当前的值（以 C# 为准，此表只供对照；来自上一版 §5.
 
 ### 5.8 CLI 录制
 
-- `contracts/cli/*.json`：`{fixture, env(cwd), clock, argv, stdin b64}` → `{exit, usageLine, stdout, dump}`。约 120 条，覆盖每个命令、参数、四种整数解析方式、标准输入编码、退出码和“数据库忙”。
+- `contracts/cli/*.json`：`{fixture, env(cwd, PINCC_GROUP), clock, argv, stdin b64}` → `{exit, usageLine, stdout, dump}`。约 150 条，覆盖每个命令、参数、四种整数解析方式、标准输入编码、退出码和“数据库忙”。
+- 新功能的录制：
+  - 清单：`--add-task` 的文字、`-`、多行和已带列表符号的输入，`add` 只带 `--add-task`；`--check`、`--uncheck` 的单个、列表、越界、`0`、非数字、在 `add` 上使用；与正文、摘要同时使用时的应用顺序；两处“标准输入只能读一次”；`show --json` 的 `tasks`；失败的命令不写入（转储不变）；
+  - 执行器和技能：`skills`、`skills --json`（内置、用户覆盖、解析错误、未确认）、`help --skill`、`run` 的每种 output（summary、append、cards、none）和失败（执行器不存在、取数步骤退出码非 0）；windows/wsl 步骤在 Mac 上的失败是 §1.4 的预期差异，只由 Swift 一侧的用例检查；`PINCC_GROUP` 并组和被忽略的两种情形。`run` 用一个测试专用的执行器文件，指向测试辅助程序（两端各自编译、行为相同：把标准输入和 `PINCC_*` 变量按固定格式写回标准输出，同 §7 Proc 契约测试的辅助子进程）；录制比较的是 PinCC 这一侧的输出、写回、退出码和 runs.log 的新行（`at`、`ms` 遮蔽）。C# 的 tests/SkillTests.cs 已经用 cmd.exe 的取数步骤和充当模型的 `more` 跑过真实管线；Swift 的同类测试用 `/bin/echo` 做取数步骤、`/bin/cat` 充当模型，在 WSL 和两台 Mac 上跑。
 - C# 端在进程内运行 `Cli.Run`，外加 Program.RunCli 包装的 10 行副本（Fetch.Text 解码标准输入、兜底退出码 1）；台账对 Program.cs:37-66 做哈希，那里一改就能发现。从不执行 PinCC.exe。
 - Swift 端既在进程内运行 PinCCCli，也作为 `pincc` 子进程运行，以检查真实的退出码和 stdout 编码。只有子进程测试允许用 `PINCC_NOW`，而且只有测试构建认这个变量。
 - 每条录制分别对 `win-*` 和 `mac-*` 样例运行。.NET 和 SQLite 给出的消息文本不参与比较，只比较“错误：”前缀和类别。帮助除命名的平台片段外逐字节比较。比较前的规范化见 §4.2.8。
@@ -640,6 +691,7 @@ Metrics 当前的值（以 C# 为准，此表只供对照；来自上一版 §5.
 - **实测值怎样比较**：
   - 只有原始文字高度允许差一行；`MeasureAuto` 的后处理（`Ceiling(PadTop + h + 3)`、夹到 MinH 和 MaxAutoHeight、只在编辑时变高、小于 1 的滞后）和 `CheckOverflow` 的 +2 余量作为原始高度的精确函数单独出向量；
   - C# 做一次敏感性分析：把每个布局场景的 AutoH 加减一行，列出结果会翻转（胶囊、隐藏、+N、✨ 标签）的场景。这些场景在 Mac 的核对里标为预期差异，其余场景必须完全相同。
+- **新增的卡片状态**：已勾选项折叠和展开、全部勾完时常驻的 ○、快速添加的输入行、胶囊的“标题 · 下一项”和标题本身是任务时只显示下一项、图片卡片悬停时的操作行底板。`Desk.SnapshotUi` 已经为这些状态各画了一张从不显示的示例卡片（`ui-card-checklist-*.png`、`ui-card-picture-bar.png`），OracleWpf 的场景覆盖同样的状态，CardScene 里带上折叠行的文案和计数、○ 的 ready 标记、进度标签是否可点（快速添加）。
 - Mac 的 verify 模式把同样的场景画到屏幕外，生成与 WPF 并排的 PNG，由你人工检查结构、顺序、颜色和文字。
 
 ### 5.10 桌面编排一致
@@ -665,11 +717,12 @@ Desk.cs 不做整体抽取（那要 9 天左右，而且对每天在用的程序
 - **非成员条目**：只看 C# 成员会漏掉两类会让向量过期的变化，台账另加两类条目，任一项变化都把相关向量族标为过期：
   - `src/UI/CardWindow.xaml`、`src/UI/Theme.xaml` 的整文件哈希，映射到 Metrics、CardScene、MdRender 族（圆角、内容区边距、编辑器底部留白、底部行高都在 XAML 里，CardWindow.xaml:9、17、19、26）；
   - 生成环境指纹：.NET 运行时版本、ICU 版本、winsqlite3 版本、zh-CN 的 `CompareInfo.Version`（Windows 更新或 SDK 更新会改变它们，src/ 却一行不变）；
-  - P1 词法抽取的方法体内字面量表（§5.1）的源码段哈希。
+  - P1 词法抽取的方法体内字面量表（§5.1）的源码段哈希；
+  - `builtin/` 整个目录的哈希，映射到执行器和技能的向量族，以及生成的字面量和 .app 里的副本（§5.1）。
 
 ### 5.12 数据字典完整性
 
-C# 扫描 src/，Swift 扫描 mac/Sources，提取设置键字面量、SQL 列名、操作名字面量、CardMeta 属性、meta 的 State 字面量、数据目录下的文件夹名，与 settings-schema.json 和 DATA.md 比对。任何未登记的项都失败。settings-schema.json 同时声明每个共享键的取值语法和是否敏感；每个数据格式变化必须带一个 `data.features` 特性 id 和对应的样例。
+C# 扫描 src/，Swift 扫描 mac/Sources，提取设置键字面量、SQL 列名、操作名字面量、CardMeta 属性、meta 的 State 字面量、数据目录下的文件夹名，与 settings-schema.json 和 DATA.md 比对。执行器和技能文件的键、`runs.log` 的字段、`skill.ok.*` 键模式、`PINCC_*` 环境变量名也在 DATA.md 里登记并被扫描（附录 D.8）。任何未登记的项都失败。settings-schema.json 同时声明每个共享键的取值语法和是否敏感；每个数据格式变化必须带一个 `data.features` 特性 id 和对应的样例。
 
 ### 5.13 Swift lint
 
@@ -752,7 +805,7 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 | 3 | CRLF | Card.IsUrl 的 `Contains('\n')`（Card.cs:212），Markdown 分行 | `"\r\n"` 是一个 Character | 在 UTF-16 上分割、查找 | 向量（CRLF 正文） |
 | 4 | Split 保留空项 | `Split('\n')` | `split` 默认丢弃空项 | DotNetCompat 的 split | 向量，lint |
 | 5 | Trim 的空白集合 | `Trim()` 用 `char.IsWhiteSpace` | `whitespacesAndNewlines` 集合不同（U+200B、U+FEFF、U+180E） | 按 .NET 表 | 向量 |
-| 6 | 大小写 | `ToLowerInvariant`（Card.Tag、When.Parse） | `lowercased()` 做完整映射，受 ICU 版本影响（İ、ß、Σ） | 按 .NET 表做简单映射 | 向量，lint |
+| 6 | 大小写 | `ToLowerInvariant`（Card.Tag、When.Parse）；技能 `when.src`、`ext` 的不分大小写匹配（以 C# 实现的比较方式为准） | `lowercased()` 做完整映射，受 ICU 版本影响（İ、ß、Σ） | 按 .NET 表做简单映射 | 向量，lint |
 | 7 | 取整 | Desk.cs:601-602、639-640（w/h），CardWindow.xaml.cs:640（透明度一位小数） | `.rounded()` 四舍五入远离零 | `.toNearestOrEven`；`Math.Round(x, d)` = `(x·10^d).rounded(.toNearestOrEven)/10^d` | 向量，lint |
 | 8 | 整数溢出 | Card.Fnv（Card.cs:217-222），Native.cs:9-17 的 Px 运算 | 溢出陷阱，程序崩溃 | `&+`、`&-`、`&*`；FNV 遍历 `utf16` | lint，毒样例 |
 | 9 | 双精度转整数 | 各处 `(int)`、`(long)` | NaN 或越界时陷阱 | `(int)`、`(long)` 强制转换：饱和（.NET 9+ x64 的行为）。`Convert.ToInt64(double)`（Card.cs:76-77，读整数列里的 REAL）：半数取偶，越界时抛 OverflowException，不饱和；Swift 同样报错，走 W3f 的单行隔离 | 向量，lint，整数列的毒样例（§5.7） |
@@ -770,11 +823,11 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 | 21 | IP 地址 | Fetch 的 IsPublic | `inet_pton` 不接受 inet_aton 形式 | NetIP 接受 inet_aton 形式和 IPv6；否则 Mac 会放行 Windows 挡住的主机（安全分歧） | URL 向量 |
 | 22 | HTML 实体 | `WebUtility.HtmlDecode` | NSAttributedString 的 HTML 解析完全不同 | HTML4 实体表 + 数字实体的怪癖 | 向量 |
 | 23 | 代码页 | Fetch.cs:185-229，Proc 的输出解码 | 没有 GB18030 常量；ICU 73+ 按 GB18030-2022 改了部分映射 | .NET 导出的解码表和 `?` 回退；标签表也从 .NET 导出 | 随机字节向量 |
-| 24 | SHA-1 十六进制 | Card.Hash 大写取 16 位；图片名小写取 20 位 | — | 两个辅助函数分开 | 向量 |
+| 24 | SHA-1 十六进制 | Card.Hash 大写取 16 位；图片名小写取 20 位；技能确认 `skill.ok.*` 直接用 Card.Hash（§4.2.10） | — | 两个辅助函数分开 | 向量 |
 | 25 | SQLite 文本 | Db.cs:119、142 用 `*16` 接口 | 常见写法用 UTF-8 接口 | 同样用 `bind_text16`、`column_text16` | 非法 UTF-8 行的转储（§5.5） |
 | 26 | 异常与退出码 | Cli 按异常类型映射退出码 | Swift 的 `throws` 没有类型层次 | 显式的错误枚举 → (退出码, 是否打印用法) | CLI 录制 |
 | 27 | 孤立代理项 | 剪贴板、命令行参数、截断 | String 不能表示 | 经 SQLite UTF-16 接口，两端同样转换。W2f 只处理 Fetch.cs:154、355。Cli.cs:252 的截断仍可能留下孤立代理项，CLI 输出把它写成 EF BF BD，Swift 照搬；Desk.cs:490、1243、ManageWindow.cs:145、CardWindow.xaml.cs:332 只影响显示，登记在 §1.4 | 向量，CLI 录制 |
-| 28 | 子进程环境 | Proc 合并环境变量 | `Process.environment` 是替换 | posix_spawn，自己合并环境 | Proc 契约测试 |
+| 28 | 子进程环境 | Proc 合并环境变量；技能运行的 `PINCC_*` 变量（§4.2.10） | `Process.environment` 是替换 | posix_spawn，自己合并环境 | Proc 契约测试；CLI 录制的假执行器回显 `PINCC_*` |
 | 29 | SIGPIPE 和 FileHandle | — | 写已关闭的管道会杀死进程；FileHandle 抛 ObjC 异常 | 忽略 SIGPIPE；用 `write(2)`/`read(2)` | Proc 契约测试 |
 | 30 | 文件修改时间 | Store.cs:284、Fetch.cs:353 | `FileManager` 返回 Date（双精度） | `stat` 的整数运算得到毫秒 | 向量 |
 | 31 | 目录枚举顺序 | 文件夹卡片的列表 | APFS 与 NTFS 顺序不同 | 先排序再截取（W2k） | 文件夹样例向量 |
@@ -788,30 +841,31 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 | .NET 基础库（字符串、字符、大小写、NumberStyles、Math.Round、转换、DateTime/TimeZoneInfo、System.Text.Json、Regex、Path、Uri、IPAddress、WebUtility、Encoding、SHA1） | `DotNetCompat/*` | 按 .NET 导出的表重写一小部分，不经 ICU 和 Foundation | 每个辅助函数一个向量文件 | §6 全部 |
 | `Db.cs`（打开、pragma、绑定和读取、Tx、Scalar、错误、data_version） | `PinCCCore/Db.swift`，经 CSQLite | `sqlite3_open_v2(READWRITE\|CREATE\|FULLMUTEX)`；busy_timeout 2000 / 5000；`journal_mode=WAL; synchronous=NORMAL`（Mac 加 `checkpoint_fullfsync`）；`enum SQLValue`；**文本用 `bind_text16`/`column_text16`**；NSRecursiveLock；Tx 为 BEGIN IMMEDIATE / COMMIT / ROLLBACK，包括 C# 回滚时掩盖异常的行为；Scalar 返回第一个非 NULL；错误带 rc | 类型边界样例（NUL、CRLF、emoji、双精度、接近 2^63 的整数）；操作脚本；第二个连接持有 BEGIN IMMEDIATE 时（SQLITE_BUSY）和共享缓存加锁时（SQLITE_LOCKED）退出码都是 4，CLI 录制分别覆盖 | UTF-8 存储；Int64 毫秒；可重入锁；每连接的 data_version；defer 里 finalize；“忙”的判断在 W2j 之前照搬 Cli.cs:126：消息含“(5)”或“(6)”都算忙，W2j 之后按结果码判断这两种 |
 | `Store.cs:29-99`（Schema、打开、Migrate、PreRelease、ReadOnly、DefaultHome、Active/All） | `Store+Open.swift`，`Generated/Schema.swift` | 同样的判断顺序；建表语句逐字节生成；最新版本打开时不写；Migrate 在 BEGIN IMMEDIATE 里复查；数据目录只经 `Home.resolve()`；每次打开都建 img/；排序用全序的 `Card.compare`；`data.features` 检查（W3e） | 新库、v1、发布前、v2、未知特性样例 → 转储 + 只读标志 + data_version 变化量；交替读写 | 无 ORDER BY 时保持 rowid 顺序 |
-| `Store.cs:105-194`（Insert、Mutate、Write、Journal、InTx、Group） | `Store+Write.swift` | 同样的 SQL 和语句顺序：先 INSERT grp=0 再 UPDATE grp=id；列差量用序数比较和 .NET 的 `double.Equals`；`updated_at = max(now, prev+1)`；cols 按首次出现合并；InTx 保存和恢复 Group 状态；`journal:false` 推进该组的 rev；写入前校验 JSON 列（§4.2.7） | 操作脚本 300 个种子（`--deep` 5,000），含双连接和 ifRev；交替读写 | `''` 与 NULL 的 cols；RevConflict → 退出码 3 |
-| `Store.cs:203-264`（Ops、Restore、Forget） | `Store+History.swift` | 逐行移植；快照用 StjReader 读（所有字段可缺省，缺省值同 C#）；id 按首次出现返回；行已不存在时重新插入且 rev 为 1；撤销新建即设置 deleted_at；负数 LIMIT 原样传下 | 覆盖每个恢复分支；交叉恢复；cols 为 NULL 的旧样例 | Forget 不留墓碑（L2 要注意） |
+| `Store.cs:105-194`（Insert、Mutate、Write、Journal、InTx、Group） | `Store+Write.swift` | 同样的 SQL 和语句顺序：先 INSERT grp=0 再 UPDATE grp=id；列差量用序数比较和 .NET 的 `double.Equals`；`updated_at = max(now, prev+1)`；cols 按首次出现合并；InTx 保存和恢复 Group 状态；`journal:false` 推进该组的 rev；写入前校验 JSON 列（§4.2.7）；run 标记和 `PINCC_GROUP` 并组：Id 为 N、卡片表为空的 Group（§4.2.3） | 操作脚本 300 个种子（`--deep` 5,000），含双连接、ifRev、run 标记和并组；交替读写 | `''` 与 NULL 的 cols；RevConflict → 退出码 3；并组的写入跨进程不合并 cols |
+| `Store.cs:203-264`（Ops、Restore、Forget） | `Store+History.swift` | 逐行移植；快照用 StjReader 读（所有字段可缺省，缺省值同 C#）；id 按首次出现返回；行已不存在时重新插入且 rev 为 1；撤销新建即设置 deleted_at；负数 LIMIT 原样传下；跳过 `card_id = 0` 的 run 标记（不进返回的 id 列表）；`Reserve`、`Join` | 覆盖每个恢复分支；交叉恢复；cols 为 NULL 的旧样例；含 run 标记的组 | Forget 不留墓碑（L2 要注意） |
 | `Store.cs:270-338`（Purge、ImgRefRx、Backup、SaveImage、ResolveImage、设置） | `Store+Files.swift`、`Store+Settings.swift` | Purge 用同一个正则（W3c 之后两端同时修正）、已用文件名集合按 OrdinalIgnoreCase、整数修改时间、时间下限经 When.Clock（W1a）；Backup：VACUUM INTO（引号加倍）、不变区域公历日期、保留 7 份、序数排序、删除失败不报错；SaveImage：小写 SHA-1 前 20 位 + 扩展名，文件不存在时原子写入；设置只提供带类型的写入 | Purge 向量（转义与不转义的斜杠、扩展名后的中文、修改时间）；交叉 Purge 保留测试；备份向量；设置解析向量 | 转义斜杠导致图片被删；img/ 里的 .DS_Store 和 `._*` 文件；导入文件的修改时间 |
 | `Card.cs:14-99`、`228-250`（字段、Columns/Values/FromRow/With、ToJson/FromJson、CardMeta） | `Card.swift`、`CardMeta.swift` | 21 个属性，默认值相同；列数组由表生成；`values()` 的 images 写 NULL 或默认 StjWriter；`init(row:)` 的 NULL 回退、标志 `!= 0`、`Int32(truncatingIfNeeded:)`；Meta 在快照里保持为不透明字符串 | ToJson、CardMeta.ToJson 字节向量；宽容读取向量；C# 写的行由 Swift 读出再写回必须逐字节相同 | PascalCase 顺序；`/` 不转义；大写 `\u`；整数不写成 `1.0`；`[]` 与 NULL |
 | `Card.cs:103-137`、`169-184`、`212-213`、`224`（FirstLine、Src、PathRx、file URI、IsUrl、Note、NoteLine、Kind、Title、ImageOnly） | `Card+Source.swift`、`Card+Derived.swift` | UTF-16 上按 10 分割保留空项、.NET Trim、只对 ASCII 的 `Trim('"','<','>')`；PathRx 手写扫描器，用 W3a 的语法；`file:///` 经 NetUri.localPath（Windows .NET 语义）；IsUrl 是 NetUri 的接受器；Title 用 WinPath.getFileName，字面量“图片”；`ForeignPath` | Windows 上生成的 1 万条以上向量（URL、IDN、含盘符 / UNC / `/Users` / `/tmp` 的 file URI、W3a 各固定前缀、仍是笔记的 `/home/…` 和 `/mnt/…` WSL 路径、引号、U+3000、CRLF 正文） | Uri 的宽容；以 `/` 开头的笔记的保护 |
-| `Card.cs:104`、`139-167`、`186-222`（Info、SrcInfo、InputHash、SummaryStale、Hash、Tag、Fnv、AutoColor、ShownColor、Progress、Compare、Overdue） | `Card+Hash.swift`、`Card+Color.swift` | Hash 是 UTF-8 上的 SHA-1、大写、前 16 位；TagRx 手写扫描器，只认 BMP 的 `\p{L}\p{N}`，`{1,32}` 按 UTF-16 数；FNV-1a 遍历 utf16 并用 `&*`；轮换用 `max(Id,0) % 7`，未知模式走默认分支；Compare 含 W2c 的 Id 打破平局；Overdue 用 When.nowMs | 哈希语料；含 İ、Σ、ß、NFD、辅助平面字符和 33 单元标签的向量；AutoColor 全模式；Compare 的符号和平局集合 | 大小写十六进制；简单与完整映射 |
+| `Card.cs:104`、`139-167`、`186-222`（Info、SrcInfo、InputHash、SummaryStale、Hash、Tag、Fnv、AutoColor、ShownColor、Progress、NextTask、TitleIsTask、Compare、Overdue） | `Card+Hash.swift`、`Card+Color.swift` | Hash 是 UTF-8 上的 SHA-1、大写、前 16 位；NextTask 取 Note 里第一个未勾选、`Plain` 之后非空的任务，全部勾完时为 null；TitleIsTask 是“有任务且标题等于某个任务的 `Plain` 文本”（序数比较）；TagRx 手写扫描器，只认 BMP 的 `\p{L}\p{N}`，`{1,32}` 按 UTF-16 数；FNV-1a 遍历 utf16 并用 `&*`；轮换用 `max(Id,0) % 7`，未知模式走默认分支；Compare 含 W2c 的 Id 打破平局；Overdue 用 When.nowMs | 哈希语料；含 İ、Σ、ß、NFD、辅助平面字符和 33 单元标签的向量；AutoColor 全模式；Compare 的符号和平局集合 | 大小写十六进制；简单与完整映射 |
 | `When.cs` | `When.swift`，基于 LocalDateTime | 模仿 DateTime 的朴素 tick 运算；只在 ToMs/FromMs 换算（§6 第 16 条），1–9999 年之外抛出并映射为 nil 或退出码 1；Parse 按同样的流程：Trim、简单小写、序数替换，再依次 RelRx、DateRx、DayWordRx、WeekRx、TimeRx；Unicode `\d` 匹配但解析失败时整体为 nil；Format 手工拼（HH:mm，月日不补零） | 语法模糊 × 时间网格 × 三个时区；每小时、每天的 Presets；天数差 −400..+400 的 Format；纽约和柏林的夏令时切换日，含回拨小时的两次出现 | 夏令时；Sunday = 0；double.Parse 得到无穷大；全角数字；分支顺序 |
-| `Markdown.cs` | `Markdown.swift` | 在 `[UInt16]` 上逐行移植；块分类用 .NET 的 `\s`、`\d` 表手写扫描；围栏判断用序数（W2a）；行内锚定匹配用 NetRegex 的 `.anchored` 或扫描器；IsWordEdge 按 UTF-16 单元用 CharInfo；UrlRx 的 IgnoreCase 只对 ASCII；Plain 按同样顺序替换；ToggleTask 只规范 CRLF，单独 CR 的毛病照搬；ContinueList 的全角数字按 W2e | 2 万行模糊（`--deep`）/ 5k 行提交：ZWSP、BOM、U+00AD、NUL、U+2028、U+0085、VT、U+3000、辅助平面、emoji ZWJ；Inlines、Plain、ToggleTask、ContinueList（含 `١.`） | RuleRx 的回溯性能 |
-| `Cli.cs` + `Program.cs:37-66` | `PinCCCli`（库 + `pincc`）+ GUI 进程内路由 | 有序参数数组（报告第一个坏参数，重复时取最后一个）；四种整数解析；在事务之前按同样顺序解析输入；ImageExt 用 CLI 自己的规则；文件存在检查区分目录；显式错误枚举；Line 和 Md 按 UTF-16 截断和填充；Dto 用缩进 + UnsafeRelaxed 的 StjWriter，嵌套 CardMeta 写出 null；Iso 手工写 ±HH:MM（不用 Z）；Help = HelpCommon + 平台片段；`export`/`import`（W5 之后） | CLI 录制 × {win, mac} 样例 × {C#, Swift 进程内, Swift 子进程}；解析器、OpFor、ImageExt 向量 | `--` 和 `-x` 当位置参数；取值参数吞掉 `--x`；标准输入在 NUL 处截断；GB18030 回退；透明度 `1` 与 `1.0` |
+| `Markdown.cs` | `Markdown.swift` | 在 `[UInt16]` 上逐行移植；块分类用 .NET 的 `\s`、`\d` 表手写扫描；围栏判断用序数（W2a）；行内锚定匹配用 NetRegex 的 `.anchored` 或扫描器；IsWordEdge 按 UTF-16 单元用 CharInfo；UrlRx 的 IgnoreCase 只对 ASCII；Plain 按同样顺序替换；ToggleTask 只规范 CRLF，单独 CR 的毛病照搬；ContinueList 的全角数字按 W2e；清单辅助函数：SetTask（已是目标状态时原样返回）、TaskLines（与进度同源，围栏里的不算）、AddTasks（ItemPrefixRx 去掉你打的 `- [ ] `、`- `、`[] `；最外层取缩进最短的任务，`MinBy` 取第一个；插在最后一个任务及紧跟其后、缩进比最外层更深的非空行之后；没有任务时 TrimEnd 后追加；结果按 LF 拼接）、FoldDone（至少 3 项已勾且还有未勾项时，已勾任务连同后面更深缩进的列表项） | 2 万行模糊（`--deep`）/ 5k 行提交：ZWSP、BOM、U+00AD、NUL、U+2028、U+0085、VT、U+3000、辅助平面、emoji ZWJ；Inlines、Plain、ToggleTask、ContinueList（含 `١.`）、AddTasks、SetTask、TaskLines、FoldDone（种子取 tests/Program.cs 的用例） | RuleRx 的回溯性能；AddTasks 会把整篇正文的 CRLF 换成 LF |
+| `Cli.cs` + `Program.cs:37-66` | `PinCCCli`（库 + `pincc`）+ GUI 进程内路由 | 有序参数数组（报告第一个坏参数，重复时取最后一个）；四种整数解析；在事务之前按同样顺序解析输入；ImageExt 用 CLI 自己的规则；文件存在检查区分目录；显式错误枚举；Line 和 Md 按 UTF-16 截断和填充；Dto 用缩进 + UnsafeRelaxed 的 StjWriter，嵌套 CardMeta 写出 null；Iso 手工写 ±HH:MM（不用 Z）；Help = HelpCommon + 平台片段；`export`/`import`（W5 之后）；清单参数（`--add-task`、`--check`、`--uncheck`、Dto 的 `tasks`，§4.2.8）；`skills`、`run`、`help --skill` 和 `PINCC_GROUP`（§4.2.10） | CLI 录制 × {win, mac} 样例 × {C#, Swift 进程内, Swift 子进程}；解析器、OpFor、ImageExt、TaskNumbers 向量 | `--` 和 `-x` 当位置参数；取值参数吞掉 `--x`；标准输入在 NUL 处截断；GB18030 回退；透明度 `1` 与 `1.0` |
 | `Fetch.cs:187-229`（Decode、Text、StrictUtf8、Utf8Complete、CharsetRx）+ `Proc.cs:68-94` 的输出解码 | `TextDecode.swift` | 按字节嗅探 BOM（与 StreamReader 相同，含 UTF-32LE `FF FE 00 00`）；手写严格 UTF-8 校验（接受 NUL 和非字符）；再用 .NET 的 GB18030 表和 `?` 回退；charset 标签表从 .NET 导出；前 4 KB 按 ASCII 扫描，≥0x80 视为 `?`；走指定编码时保留 BOM | 1 万个随机字节串 + 手写用例 | 整段变乱码的情况也照搬 |
 | `Fetch.cs:14-30`、`134-155`、`232-259`、`463-517`、`556-593`（Page、FromHtml、M/Attr、MainText、KnownContainers、JsonLd、Snippet、Cap、Clean、Host、HtmlDecode） | `HtmlExtract.swift`、`JsonLd.swift`、NetUri.host | 在 NSString/UTF-16 上逐步移植；惰性块模式用扫描器；`Element()`、`Attr()` 和运行时拼出的正则用扫描器；MaxBy 取第一个最大值；JsonLd 用类似 STJ 的严格解析器（深度 64、拒绝 BOM、重复键取最后、单块出错时保留已得结果）；Date 取前 10 个 UTF-16 单元（W2f）；在主线程之外运行 | 保存的网页语料（微信、知乎、CSDN、GitHub、GBK、新闻）→ Title、Desc、Site、Date、Text、Thin、Hash(Text)；对抗性合成页面、2 MB 页面、实体表 | 阈值按 UTF-16；`>` 后接 U+0338；ICU 回溯上限；`''` 会截断 `??` 链；写进正文的 Host() 逐字节相同 |
 | `Fetch.cs:267-330`（SafeToAuto、IsPublic、SecretQuery、LocalSuffixes）和 `277-294` SafeToAutoAsync | `UrlGuard.swift`；`PinCCMacPlatform/Dns.swift` | NetUri（小写 scheme、UserInfo、DnsSafeHost、Query）、NetIP、逐字节移植 IsPublic；查询串按 `&` 和 `;` 分割，先把 `+` 换成空格再宽容地反转义；DNS 用 getaddrinfo 解析 IDNA 主机，4 秒超时 | 数千条 URL 向量加现有 FetchTests 列表 | inet_pton 放行 Windows 挡住的主机；`removingPercentEncoding` 返回 nil；ICU 完整大小写折叠（paßword） |
 | `Fetch.cs:335-458`（File、FileText、OfficeText、DocExt、FileName、IsPdf、ImageExt、SaveDownload） | `FileFacts.swift`、`ZipReader.swift`（CZlib 原始 inflate）、`WebRoute.swift` | stat 的整数修改时间；FType 用简单大写映射和字面量“文件夹”；文件夹列表先排序再取 40 项（W2k）；Desc 前 300 个 UTF-16 单元（W2f）；ZIP 读取器解析中央目录，支持 stored 和 deflate、数据描述符，60 MB 上限，Deflate64 标为不支持；Office 文本用同样的正则步骤，幻灯片顺序由 `int.TryParse` 溢出为 0 决定；二进制判断是前 8000 字节里有 NUL；任何错误返回 `''`；SaveDownload 用小写 SHA-1 20 位、原子写入；Mac 的 .app、.rtfd、iWork 包算文件 | 固定修改时间的文件语料 → CardMeta.ToJson、文本、TextHash；slide10 排在 slide2 前、平局、ZIP64 的 Office 样例 | 下载文档的 TextHash 照搬各自的绝对路径（§3.5.2） |
 | `Fetch.cs:33-131`、`158-184`、`523-553`（HTTP 客户端、GetChecked、WebCore 路由、ReadCapped、Rendered/Edge） | `PinCCMacPlatform/Web.swift`（URLSession）、`WebKitRenderer.swift`；纯路由在 `WebRoute.swift` | 每个 C# 客户端一个临时会话，忽略缓存，请求头字节与 Windows 相同（User-Agent、Accept、Accept-Language、Accept-Encoding）；重定向代理停止自动跟随，自己数 8 跳、拒绝 https→http、自动读取时每一跳先检查；可重置的总期限（15 s，然后 60 s）；Content-Type 和 Content-Disposition 用 .NET 兼容的语法解析，不用 `mimeType`、`suggestedFilename`；上限按解压后的字节；超时文案“超时”；`NSAllowsArbitraryLoads`；Rendered 优先用已安装的 Chrome 或 Edge，否则 WKWebView（不持久化，不在数据目录里） | Mac 测试里的回环录制服务器（原始状态、头和正文：gzip/br，上限 max−1/max/max+1，401/403/429/503，1–9 跳重定向，RFC 5987/2047）；路由决定在 WSL 里出向量 | ATS；嗅探的 MIME；压缩后的 Content-Length；空闲超时与总超时 |
-| `Llm.cs`（Table、Tokens、构造规范化、Resolve/Save/Problem、Prompt、Defang、OneLine、DefaultTemplate、StripFence、Ansi、Detect/Scan 解析、LoginEnv 解析；W4a 从 `Ask` 抽出的 `PreparePrompt`、`Outcome`） | `PinCCCore/Llm.swift`（纯）；`PinCCMacPlatform/ToolHost.swift` | 工具表和模板由 C# 生成；并发上限 2（Llm.cs:51）和原生 150 秒超时（Llm.cs:210，WSL 的 180 秒只属于 Windows）写进数据表；ToolHost 调用 `PreparePrompt`（gemini/qwen 的 `@` 转义、ollama 缺模型的报错）和 `Outcome`（去 ANSI、Tail 300、“退出码 N，没有输出”、StripFence），不自己重写这些规则；Tokens 作为真正的 argv 传递（保留空项）；Prompt 手工单遍替换，ReplaceLineEndings 按 .NET 的集合（不含 VT）；StripFence、ANSI 去除逐行移植；环境白名单按插入顺序；Mac 解析器只读 `mac.llm.*`，捕获登录 shell 环境，与进程环境合并，搜索 PATH 候选；工作目录是文档所在文件夹或 `~/Library/Caches/PinCC/llm`，并检查存在 | Prompt 向量（CRLF 模板，值里含 `{content}`、`$1`、`\`）、各工具各模式的 Tokens、StripFence、Ansi、构造规范化、Resolve、PreparePrompt、Outcome；Mac 专有的解析器测试 | Windows 的 `llm.*` 从不读写；Llm.cs:197 的 `/` 工作目录捷径不照搬（Mac 路径都以 `/` 开头） |
+| `Llm.cs`（Table、Tokens、构造规范化、Resolve/Save/Problem、Prompt、Defang、OneLine、DefaultTemplate、StripFence、Ansi、Detect/Scan 解析、LoginEnv 解析；W4a 从 `Ask` 抽出的 `PreparePrompt`、`Outcome`） | `PinCCCore/Llm.swift`（纯）；`PinCCMacPlatform/ToolHost.swift` | 模板由 C# 生成；工具表改为 `builtin/agents/*.json`（§4.2.10，逐项等于原 Table），Tokens 变成“执行器参数 + 授权翻译”的展开；并发上限 2（Llm.cs:51）和原生 150 秒超时（Llm.cs:210，WSL 的 180 秒只属于 Windows）写进数据表；ToolHost 调用 `PreparePrompt`（执行器的 `promptEscapes`、`requiresModel`，即原来 gemini/qwen 的 `@` 转义和 ollama 缺模型的报错）和 `Outcome`（去 ANSI、Tail 300、“退出码 N，没有输出”、StripFence），不自己重写这些规则；Tokens 作为真正的 argv 传递（保留空项）；Prompt 手工单遍替换，ReplaceLineEndings 按 .NET 的集合（不含 VT）；StripFence、ANSI 去除逐行移植；环境白名单按插入顺序；Mac 解析器只读 `mac.llm.*`，捕获登录 shell 环境，与进程环境合并，搜索 PATH 候选；工作目录是文档所在文件夹或 `~/Library/Caches/PinCC/llm`，并检查存在 | Prompt 向量（CRLF 模板，值里含 `{content}`、`$1`、`\`）、各执行器各授权组合的参数展开、StripFence、Ansi、构造规范化、Resolve、PreparePrompt、Outcome；Mac 专有的解析器测试 | Windows 的 `llm.*` 从不读写；Llm.cs:197 的 `/` 工作目录捷径不照搬（Mac 路径都以 `/` 开头） |
+| （新）`src/Core/Agents.cs`（BuiltinFiles、RunnerProfile、Runners、RunLog）、`Skills.cs`（Skill、Skills、SkillRequest、SkillRun）；`Llm.cs` 按执行器文件构造命令、`StepCommand` 运行取数步骤；`Store.cs` 的 Reserve、Join；`Cli.cs` 的 skills、run、help --skill；`Desk.cs` 的 Ask、AutoRun、RunSkill、RunDeskSkill、Confirm；`ManageWindow.cs` 的“技能与执行器”一节；`builtin/`；测试 tests/SkillTests.cs（75 项） | `PinCCCore/Agents.swift`、`Skills.swift`、`SkillRun.swift`（纯规则和管线，经 Proc 启动）；`PinCCMacPlatform/ToolHost.swift`（登录 shell 环境、TCC）；DeskCore 里的 ✨、自动运行、菜单和写回；`Generated/Builtin.swift` | C# 先实现、先发布；Swift 逐项移植解析（元数据切分、跨行 JSON、StjReader 严格度）、校验正则、`when` 匹配和具体度、授权翻译、参数和提示词构造、环境变量表、确认哈希、runs.log 的一行；运行管线的顺序（取数步骤依次执行、拼成 `{content}`、模型、按 output 写回、记 runs.log）照搬；`where` 为 windows/wsl 的步骤在 Mac 上报错（§1.4）；内置文件用生成的字面量（§5.1） | 解析、选择、展开、提示词、哈希向量；CLI 录制（假执行器）；操作脚本的 run 标记和并组；FakeHost 场景（✨ 选中哪个技能、新建时自动运行、未确认不自动运行、写回和撤销整组） | 这部分还在改动，Swift 等 C# 定稿、台账接受后再跟进；Tag 和 `src` 通配符是运行时拼出的正则（§5.4）；执行器 JSON 的宽松读取（不分大小写、注释、结尾逗号）不能用 Card 快照的严格 StjReader；Mac 上的 PATH、TCC 和 `PINCC_EXE` 的路径（§8.13） |
 | `Proc.cs`（Run、Sink、Job 对象） | `PinCCCore/Proc.swift`（POSIX，WSL 可测） | posix_spawn + POSIX_SPAWN_SETPGROUP；忽略 SIGPIPE；后台线程用 `write(2)` 写标准输入；两个管道都读完；8 MB / 1 MB 上限；一个总期限覆盖写标准输入；killpg(SIGTERM) 再 SIGKILL；3 秒管道宽限；合并而不替换环境；启动错误映射到同样的“吞掉”类别。Job 的 KILL_ON_JOB_CLOSE 用 applicationWillTerminate 里的 killpg 近似（尽力而为，已记录；调用 setsid 的孙进程收不到） | 共享契约测试，用一个很小的辅助子进程（回显、睡眠、忽略标准输入、非法 UTF-8、持有管道的孙进程），WSL 和两台 Mac 都跑 | SIGPIPE；FileHandle 的 ObjC 异常；信号退出码；孤儿进程 |
 | `Layout.cs` + `Native.cs:7-35`（Px、Screen、Tile、Place、PushOut）+ W4 之后的 Trim/Spot/HubRect | `PinCCDesk/Layout.swift`、`Geometry.swift` | Int 运算直接移植，`&+` 等；Screen.Px 用 NetRound；OrderBy 的稳定性用索引显式保证；`min(by:)` 取第一个最小值；保留 `W == 0` 表示“没有命中”；整数除法截断；保留 ClampInto | 现有 Layout 测试转为向量，加 C# 生成的随机场景；毒样例 | 奇数像素的半数取偶 |
-| `Desk.cs:798-892` DoLayout（W4b 之后是 LayoutPass.Compute） | `PinCCDesk/LayoutPass.swift`；应用步骤在 PinCCApp（一个 CATransaction） | 纯函数，输入按 Id 排序（W4d）；忙碌的卡片只向下长到下一个障碍物；自由卡片逐个推开；未知显示器按主屏平铺；悬停推迟按显示器，保留上一次的溢出状态；到期折叠规则；图片胶囊在右边；可见性规则；重排的同步与 100 ms 防抖留在 DeskCore | LayoutPass 向量（≥2,000）；Windows 影子日志 10 天为零；Mac verify 渲染同样的场景 | DIP 与像素的取整；Mac 的 y 翻转只在 MacScreens 里做一次 |
-| `src/UI/Rules.cs`（W4a）：NaturalSize、ZoomSize、ZoomTarget、Budget、MaxAutoHeight、PicturePlan、CardGeometry（DipSize、Expanded、MinSize）、Size、Breakable、LinkCaption、FileFacts、Chips/Actions 规格、Frame、ShownOpacity、AutoHeight（后处理）、Overflow（+2 余量）、EditorOps.Apply、CommitAction.Decide、OnExternal、ReloadDiff、StripText、StripRect、PeekRect、MoveCommit.Decide、Due、Alarm、FileChanged、LinkMeta、FileTextHash、SumHashFor、NeedsSummary、SummaryInput.Select、Stale、HotkeyPlan、ReminderOptions、ReminderHint、Library 的 Match/In/Facts/HistoryLine、NextColor、ColorOf、IsCliInvocation、DeskSettings.Parse、SettingsSchema.PromptToStore、HubRect、Dial、Badge、SnapCorner、HitTest、KeepAspect、EffFree（W3d） | `PinCCDesk/Rules.swift` | 每个静态函数一对一移植，台账逐个映射 | 每个函数一个向量文件（固定时钟、时区、假屏幕） | 半数取偶（W/H、行高、透明度一位小数、缩放边带）；百分比和数字格式按 zh-CN 写死（`P0` 为 `80%`，`0.#` 远离零舍入）；UTF-16 截断；墙上时间的稍后提醒；过期结果丢弃；SumHash 哨兵 |
-| `Desk.cs` 的编排（Start、Maintenance、Change、Push、Gesture、Undo、NewCard、CreateFrom、Ingest、粘贴、编辑会话、完成与撤销条、单卡命令、临时展开、缩放、OnUserMoved、批量命令、Open、Hub、Tick、RefreshFiles、Poll/Reload、Enrich、Summarize、热键、菜单、Notify、Spot） | `PinCCDesk/DeskCore.swift`（+ EditSession、UndoStack、GestureClock、MenuSpec 构建） | 按 desk-transitions.md 和 desk-commands.json 编写；所有决定调用 Rules.swift；操作名只来自表；卡片注册表按 Id 有序；定时器经 IScheduler，常量来自表；提醒按 1 秒网格评估；Mac 专有的规则（`mac.*` 设置、SMAppService、异机路径的运行时状态）在接口后面 | FakeHost 覆盖每一行转移；PINCC_TRACE 重放；操作效果用脚本转储格式检查（FakeHost 用真实的 Store） | 撤销去重和移到栈顶；600 ms 手势组；编辑中 CLI 写入另起一组；撤销条保留整张卡片的矩形作为障碍物；每进程只响一次；每批一声；enrich 的 `_reenrich` 标记；`journal:false` 的 meta；自动摘要不进撤销栈 |
-| `CardWindow.xaml.cs:137-653` + `MarkdownView.cs` + `Palette.cs`（1040-1076 的 HitTest、KeepAspect 归入下面 Rules 一行；1002-1037 的 WndProc 在台账里标为 platform-only） | `CardPresenter.swift` → CardScene；`MdRender.swift`；`Generated/Palette.swift`；`PinCCApp/CardPanel`、`CardContentView`、`MdAttributed` | Presenter 用 Rules 和表构建 CardScene；AppKit 视图只负责画；MdRender 按 MarkdownView 的规则（缩进 16；段间距 10、2、6；标题字号；• 和 ◦；引用条 2.5；代码块样式；方框 14）；颜色在 sRGB 里创建 | OracleWpf 的 CardScene、MdRender 向量；Mac 屏幕外渲染与 Windows 并排比较 | 置顶标签的 `P0` 百分比；Size 的 `0.#`；图片 `0.6×room`（以代码为准，不是注释）；文字胶囊用 W 而不是 `max(W,160)` |
+| `Desk.cs:798-892` DoLayout（W4b 之后是 LayoutPass.Compute） | `PinCCDesk/LayoutPass.swift`；应用步骤在 PinCCApp（一个 CATransaction） | 纯函数，输入按 Id 排序（W4d）；忙碌的卡片（编辑、清单快速添加、撤销条、临时展开、正在拖动或缩放，Desk.cs 的 `Busy`）原地不动、只向下长到下一个障碍物；自由卡片逐个推开；未知显示器按主屏平铺；悬停推迟按显示器，保留上一次的溢出状态；到期折叠规则；图片胶囊在右边；可见性规则；重排的同步与 100 ms 防抖留在 DeskCore | LayoutPass 向量（≥2,000）；Windows 影子日志 10 天为零；Mac verify 渲染同样的场景 | DIP 与像素的取整；Mac 的 y 翻转只在 MacScreens 里做一次 |
+| `src/UI/Rules.cs`（W4a）：NaturalSize、ZoomSize、ZoomTarget、Budget、MaxAutoHeight、PicturePlan、CardGeometry（DipSize、Expanded、MinSize）、Size、Breakable、LinkCaption、FileFacts、Chips/Actions 规格、Frame、ShownOpacity、AutoHeight（后处理）、Overflow（+2 余量）、EditorOps.Apply、CommitAction.Decide、OnExternal、ReloadDiff、StripText、StripRect、PeekRect、MoveCommit.Decide、Due、Alarm、FileChanged、LinkMeta、FileTextHash、SumHashFor、NeedsSummary、SummaryInput.Select、Stale、HotkeyPlan、ReminderOptions、ReminderHint、Library 的 Match/In/Facts/HistoryLine、NextColor、ColorOf、IsCliInvocation、DeskSettings.Parse、SettingsSchema.PromptToStore、HubRect、Dial、Badge、SnapCorner、HitTest、KeepAspect、EffFree（W3d），以及清单新增的 PillTitle（胶囊的“标题 · 下一项”，标题本身是任务时只显示下一项）、CompleteReady（全部勾完且未到期时 ○ 高亮常驻）、进度标签是否可点（非胶囊、已存库的卡片），以及技能带来的 ✨ 标签是否显示和文案（CardWindow.xaml.cs 的 `StateChips`：output 不是 summary、摘要过时、或没有摘要且溢出或不会自动运行时显示） | `PinCCDesk/Rules.swift` | 每个静态函数一对一移植，台账逐个映射 | 每个函数一个向量文件（固定时钟、时区、假屏幕） | 半数取偶（W/H、行高、透明度一位小数、缩放边带）；百分比和数字格式按 zh-CN 写死（`P0` 为 `80%`，`0.#` 远离零舍入）；UTF-16 截断；墙上时间的稍后提醒；过期结果丢弃；SumHash 哨兵 |
+| `Desk.cs` 的编排（Start、Maintenance、Change、Push、Gesture、Undo、NewCard、CreateFrom、Ingest、粘贴、编辑会话、完成与撤销条、单卡命令、临时展开、缩放、OnUserMoved、批量命令、Open、Hub、Tick、RefreshFiles、Poll/Reload、Enrich、Summarize、热键、菜单、Notify、Spot；新增的 NewFromHub、AddTasks 和快速添加会话、技能运行） | `PinCCDesk/DeskCore.swift`（+ EditSession、AddSession、UndoStack、GestureClock、MenuSpec 构建） | 按 desk-transitions.md 和 desk-commands.json 编写；所有决定调用 Rules.swift；操作名只来自表；卡片注册表按 Id 有序；定时器经 IScheduler，常量来自表；提醒按 1 秒网格评估；Mac 专有的规则（`mac.*` 设置、SMAppService、异机路径的运行时状态）在接口后面 | FakeHost 覆盖每一行转移；PINCC_TRACE 重放；操作效果用脚本转储格式检查（FakeHost 用真实的 Store） | 撤销去重和移到栈顶；600 ms 手势组；编辑中 CLI 写入另起一组；撤销条保留整张卡片的矩形作为障碍物；每进程只响一次；每批一声；enrich 的 `_reenrich` 标记；`journal:false` 的 meta；自动摘要不进撤销栈；+ 贴图：剪贴板“新”才贴、一次复制只贴一次、多张图一个组；快速添加：整个会话一个组，完成、折叠、进入编辑、失去 key 之前先结束会话并保留已输入的文字（Desk.cs 的 `Finish`、`ToggleCollapse` 先调 `EndAdd`）；技能：未确认的不自动运行，一次运行一个组，写回也在这一组 |
+| `CardWindow.xaml.cs:137-653` + `MarkdownView.cs` + `Palette.cs`（1040-1076 的 HitTest、KeepAspect 归入下面 Rules 一行；1002-1037 的 WndProc 在台账里标为 platform-only） | `CardPresenter.swift` → CardScene；`MdRender.swift`；`Generated/Palette.swift`；`PinCCApp/CardPanel`、`CardContentView`、`MdAttributed` | Presenter 用 Rules 和表构建 CardScene；AppKit 视图只负责画；MdRender 按 MarkdownView 的规则（缩进 16；段间距 10、2、6；标题字号；• 和 ◦；引用条 2.5；代码块样式；方框 14；清单折叠行：`FoldDone` 的结果、“已完成 N 项 / 收起已完成的 N 项”、字号 −1.5、上边距 6，只折叠正文不折叠摘要）；折叠与否是每个窗口的临时状态，不写库；CardScene 另带 ○ 的 ready 标记、快速添加输入行、图片卡片操作行的底板（CardWindow.xaml 的 `Bar`）；颜色在 sRGB 里创建 | OracleWpf 的 CardScene、MdRender 向量；Mac 屏幕外渲染与 Windows 并排比较 | 置顶标签的 `P0` 百分比；Size 的 `0.#`；图片 `0.6×room`（以代码为准，不是注释）；文字胶囊用 W 而不是 `max(W,160)` |
 | `CardWindow.xaml.cs:692-702`、`747-855`（编辑操作和光标） | `PinCCDesk/EditorOps.swift`；`PinCCApp/EditorTextView`（NSTextView） | `EditorOps.apply(文本, UTF-16 选区, 操作)` → 结果；向量用 **WPF 形状的文本**生成：回车插入的是 CRLF（CardWindow.xaml:20 AcceptsReturn，WPF 插入 Environment.NewLine），续列表插入的是 LF；界面保存过的正文是 LF（CardWindow.xaml.cs:711、735），但经 CLI（Cli.cs:222-235）或剪贴板、拖入（Desk.cs:368-372、390-396）写入的正文保留 CRLF，进入编辑时原样载入（CardWindow.xaml.cs:683）；CurrentLine 只按 `\n` 分割（CardWindow.xaml.cs:762-769），所以以 CRLF 结尾的行保留 `\r`，续列表在那里停止（775 行）。向量的初始文本同时覆盖 LF 正文和整篇 CRLF 正文。Mac 编辑器载入时不规范行尾；回车插入什么由 §12 第 14 条决定：选“在 C# 里修”时 W2m 让 C# 按 LF 计算当前行，Mac 回车插入 LF；选“照搬”时 Mac 回车也插入 CRLF，缓冲区按 WPF 的形状保存。P7 开始前必须有答案 | EditorOps 向量（续列表、缩进和取消缩进、包裹、前缀切换、`[]` 快捷输入）；提交规则向量；P0 输入法闸门 | 列表模式里显式的 .NET `\s`；序数 StartsWith |
-| `HubWindow.cs`、`Flyout.cs`、`Toast.cs`、`ManageWindow.cs`（模型）、`Hotkeys.cs` | `HubModel`、`PickerModels`、`LibraryModel`、`SettingsSchema`、`KeyBindings`；`PinCCApp/HubPanel`、选择器（默认子面板）、Toast、设置和卡片库（SwiftUI）、`MacHotkeys`（Carbon）+ 录入 | 模型从 Rules 函数移植；Mac 用 `mac.hk.*` 和自己的写法（⌃⌥⇧⌘）、Mac 已知冲突表，三种状态相同（`''` 未绑定，无此行为默认）；角标问题文字保留“被”“与”前缀的约定 | 模型向量（速拨顺序、角标优先级、提醒选项和提示、卡片库匹配）；命令、绑定、图标的表完整性测试 | Mac 从不写 `hk.*`；卡片库搜索按 UTF-16 的 OrdinalIgnoreCase；历史预览 40 单元 |
-| `ClipData.cs` + Desk 的 CreateFrom/Ingest/粘贴 + Native/App/Program（Win32 外壳） | `PinCCDesk/ClipIngest.swift`（可移植的规划）+ `PinCCApp/MacPasteboard`、`DragIn`、`DragOut`、`main.swift`、`AppDelegate`、`MacScreens`、`FullscreenMonitor` | ClipPayload{files, text, sourceUrl, png} → ClipIngest.plan，照搬 Desk 的规则（12 个文件上限、用 NetUri Host 得到来源后缀、一个操作组）；Mac 的扩展名集合增加 heic、heif、avif，一律转码；单实例用 flock + 分布式通知（ShowAll 语义） | ClipIngest 向量；P0 剪贴板和 accessBehavior 检查；Mac verify 场景 | 来源网址尽力而为（已记录）；剪贴板隐私提示；启动参数过滤 |
+| `HubWindow.cs`、`Flyout.cs`、`Toast.cs`、`ManageWindow.cs`（模型）、`Hotkeys.cs` | `HubModel`、`PickerModels`、`LibraryModel`、`SettingsSchema`、`KeyBindings`；`PinCCApp/HubPanel`、选择器（默认子面板）、Toast、设置和卡片库（SwiftUI）、`MacHotkeys`（Carbon）+ 录入 | 模型从 Rules 函数移植；Mac 用 `mac.hk.*` 和自己的写法（⌃⌥⇧⌘）、Mac 已知冲突表，三种状态相同（`''` 未绑定，无此行为默认）；角标问题文字保留“被”“与”前缀的约定；+ 的单击走 NewFromHub（提示文字里有“刚复制了图片时点 + 直接贴成 1:1 图片卡片”）；设置页的 AI 工具列表来自执行器文件，新增“技能”一节 | 模型向量（速拨顺序、角标优先级、提醒选项和提示、卡片库匹配）；命令、绑定、图标的表完整性测试 | Mac 从不写 `hk.*`；卡片库搜索按 UTF-16 的 OrdinalIgnoreCase；历史预览 40 单元 |
+| `ClipData.cs` + Desk 的 CreateFrom/Ingest/粘贴 + Native/App/Program（Win32 外壳） | `PinCCDesk/ClipIngest.swift`（可移植的规划）+ `PinCCApp/MacPasteboard`、`DragIn`、`DragOut`、`main.swift`、`AppDelegate`、`MacScreens`、`FullscreenMonitor` | ClipPayload{files, text, sourceUrl, png} → ClipIngest.plan，照搬 Desk 的规则（12 个文件上限、用 NetUri Host 得到来源后缀、一个操作组）；+ 贴图的 `ClipIngest.pictures`（ClipData.cs 的 `Pictures`）和编辑框粘贴的 `ClipIngest.editorPaste`（Desk.cs 的 `IngestImages`：先文件，再文字交给编辑器，再位图）；“新”的判断（ClipData.cs 的 `Fresh`、`MarkUsed`：每次读取和每次写入都记下序号）经 IClipboard 的 `changeCount`；Mac 的扩展名集合增加 heic、heif、avif，一律转码；单实例用 flock + 分布式通知（ShowAll 语义） | ClipIngest 向量；FakeHost 场景（连点两次 +、卡片 ⌘C 后点 +、编辑框粘贴截图）；P0 剪贴板和 accessBehavior 检查；Mac verify 场景 | 来源网址尽力而为（已记录）；剪贴板隐私提示；启动参数过滤；访达拷贝文件时剪贴板里还有文件名文字和图标位图，必须先看文件（§8.8） |
 | （新，W5）Cli 的 export/import 和数据搬迁规则 | `PinCCCore/Bundle.swift` + PinCCCli 命令 | 先在 C# 实现，再移植；包是带 bundle_meta 和 bundle_files 的 SQLite 文件；导入：GUI 运行时拒绝、先备份、文件并集写入且修改时间设为现在、一个事务、保留本机作用域和敏感设置 | CLI 录制：Windows 导出 → Swift 导入以及反向（WSL 交替读写和两台 Mac 的样例）；转储除本机设置外与源相同 | WAL 撕裂的复制；更新的表结构；Purge 清掉导入的文件；覆盖本机设置；保留 id 和撤销历史；泄漏密钥 |
 
 ---
@@ -875,6 +929,11 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
   - 永远不加 `.fullScreenAuxiliary`，全屏应用所在的空间里不会出现卡片。
 - **移动窗口**：置前用 `orderFrontRegardless()`（不激活程序）；退后用 `order(.below, relativeTo:)`；放置用 `setFrame(_:display: false)`，同一次布局的所有窗口放在同一个 `CATransaction.setDisableActions(true)` 里。
 - **内容视图**：用 layer 绘制，8 pt 连续曲率圆角（`cornerCurve = .continuous`），1 px 描边。描边按 CardScene 的边框样式：到期 2 px 红色，选中为强调色，普通为 ink 0.12。各部分按 CardScene 生成。
+- **清单的显示**（规则来自 Rules 和 CardScene，§7）：
+  - 进度标签 ☑ N/M 在非胶囊、已存库的卡片上可以点：悬停时后面加一个 ＋，点它开始快速添加（§8.3）；新卡片和胶囊里的进度标签不可点；
+  - 全部勾完且未到期时，○ 用强调色、不透明度 1、浅底（对应 Theme.xaml 里 `Tag="ready"` 的触发器）并常驻，不随悬停淡出，提示“清单已全部勾完 · 点此完成这张卡片”；只是提示，不自动完成；
+  - 胶囊显示“标题 · 下一项”，下一项用常规字重、ink 60%；标题本身就是一个任务时只显示下一项；
+  - 已勾选项的折叠行见 §8.4；图片卡片的操作行底板见 §8.12。
 - **悬停和第一次点击**：
   - NSTrackingArea 选项 `[.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect]`。没有 `.activeAlways` 的话 PinCC 不在前台时悬停按钮不会出现，而不在前台是常态。`.activeAlways` 不支持 `.cursorUpdate`，所以光标在 `mouseMoved` 里设置；
   - `acceptsFirstMouse(for:) = true`，否则点 ○、📌 的第一下只会激活程序；
@@ -898,8 +957,17 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 - **行尾**：U+2028、U+2029 在输入时换成 `\n`。回车插入 LF 还是 CRLF 由 §12 第 14 条决定（§7 EditorOps 一行、§1.4）；载入的正文不规范行尾。提交时按 C# 规则做 CRLF→LF 加 TrimEnd，自动保存不裁剪。
 - **按键处理**：Return、Tab、⇧Tab、Esc 在 `textView(_:doCommandBy:)` 里处理（`insertNewline:`、`insertTab:`、`insertBacktab:`、`cancelOperation:`）。这个回调只在输入法提交之后触发，所以拼音选词时按回车不会误续列表。`[] ` 快捷改写用 `hasMarkedText()` 保护。
 - **可撤销**：EditorOps 的修改依次调用 `shouldChangeText`、`replaceCharacters`、`didChangeText`，⌘Z 能撤销。
-- **粘贴**：重写 `paste(_:)` 处理图片和文件。插入点和选区颜色取卡片的强调色。
+- **粘贴**：WPF TextBox 只接受文字粘贴，剪贴板里只有图片（截图）或文件时 Ctrl+V 会被静默忽略，所以 C# 的编辑器自己处理 Ctrl+V 和 Shift+Insert（CardWindow.xaml.cs 的 `OnEditorKey` → `PasteData` → Desk.cs 的 `IngestImages`）。NSTextView 在 `isRichText = false`、`importsGraphics = false` 时同样只读文字类型，“编辑 › 粘贴”在只有图片时是否被禁用、⌘V 是否只响一声，待实测。做法：
+  - 重写 `readablePasteboardTypes`，加入文件 URL、PNG、TIFF（和 HEIC），让粘贴在只有图片或文件时仍然可用；
+  - 重写 `paste(_:)`（和 `pasteAsPlainText(_:)`），按 `ClipIngest.editorPaste` 的顺序处理：有文件时图片进卡片的图片、其余文件成为路径行；否则有文字就交给 `super` 按纯文字粘贴；否则位图进卡片的图片（还没存库、正文为空的新卡片随即结束编辑，成为图片卡片；其余情况显示角标“已添加图片”）；
+  - 必须先看文件：访达拷贝文件时剪贴板里同时有文件名文字和图标位图（§8.8），先看文字会把文件名贴进正文。C# 的 `IngestImages` 本来就先看文件；
+  - 插入点和选区颜色取卡片的强调色。
 - **不绑定 ⌃+字母**：保留 NSTextView 自带的 Emacs 式按键（⌃A、⌃E、⌃K 等）。
+- **清单快速添加**（CardWindow.xaml.cs 的 `StartAdd`、`EndAdd`）：点进度标签或菜单“添加一项”，底行换成单行输入框，前面画一个空方框，占位提示“添加一项 · Enter 确认，Esc 结束”。
+  - 用单行 NSTextField（或单行的 NSTextView），同样关闭全部自动替换；卡片要成为 key，焦点做法同编辑（方案 A/B）。
+  - Return 在 `control(_:textView:doCommandBy:)` 的 `insertNewline:` 里处理，所以拼音选词时的回车不会加项：非空时调用 `Markdown.AddTasks` 写库、清空输入框、继续等待；空行 Return、Esc（`cancelOperation:`）、失去 key 时结束，已输入的文字照样加进去。
+  - 粘贴含换行的文字时一行一项（输入框里已有的文字 + 粘贴内容一起交给 AddTasks）；单行输入框默认怎样处理粘贴进来的换行待实测，所以在字段编辑器里拦截粘贴。
+  - 整个会话是一个操作组（`Store.Begin()` 一次，撤销时一次撤掉全部新增项），与 NSTextView 自己的撤销无关；输入期间卡片算“忙碌”，原地不动、只向空处长高（§7 LayoutPass）；完成、折叠、进入编辑之前先结束会话。
 - **焦点方案 A（首选）**：卡片是能成为 key 的不激活面板，打字时前一个程序仍在前台。按 Esc 时要把键盘还给原程序，同时卡片留在屏幕上。AppKit 没有“只放弃 key”的公开接口（`resignKey()` 是回调，不能直接调用；Spotlight 类面板靠关闭面板交还焦点）。具体做法 P0 验证，例如在同一个 CATransaction 里先 `orderOut` 再 `orderFrontRegardless`，确认原程序重新收到键盘、卡片不闪。
 - **焦点方案 B（A 不通过时）**：编辑时激活 PinCC；按 Esc 时调用 `NSApp.yieldActivation(to:)` 再激活之前的程序（macOS 14 的协作式激活）。部署目标退到 13 或 12 时（§9.1），这一步放在 `#available(macOS 14, *)` 里，更早的系统直接对之前的程序调用 `NSRunningApplication.activate(options:)`。
 - 两种方案都在 `IFocus` 接口后面，DeskCore 不用改。
@@ -909,6 +977,7 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 - 由 MdRender 生成 NSAttributedString。字体：系统字体（SF Pro，中文自动回退到苹方）和等宽系统字体（SF Mono），字号 13/14/16/18 与 Windows 相同；段落行高 `min/maxLineHeight = round(1.5×字号)`。
 - 列表用 headIndent 加制表位；链接用 `.link` 属性；任务方框用 NSTextAttachment，按字符位置判断点击；引用条和代码块背景按 MdRender 的样式标记绘制。
 - 双击时把光标放到对应位置：每段带 `pincc.line` 属性记录源码行号，再结合 `characterIndexForInsertion(at:)`。
+- **清单折叠**：已勾选 ≥ 3 项且还有未勾项时，已勾选的任务连同它们的子项不显示，末尾加一行“› 已完成 N 项”（展开后是“⌄ 收起已完成的 N 项”），次要文字色，点击切换（`Markdown.FoldDone` 和 MarkdownView.cs 的 `FoldLine`）。这一行用单独的可点区域，不参与 `pincc.line` 的双击定位；展开状态只属于这个面板，不写库，切换后立即重排一次（C# 用 Loaded 优先级的强制 Relayout）。只折叠正文，不折叠摘要。
 
 ### 8.5 + 按钮、提示条、选择器、菜单
 
@@ -917,10 +986,11 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
   - 手写拖动，松开时按 Rules 的 `SnapCorner` 吸附到最近的屏幕角；
   - 悬停速拨：NSTrackingArea（`.activeAlways`），进入 300 ms、离开 350 ms 延时，弹出“平铺显示 / 全部折叠·展开 / 最小化全部·恢复显示”。项目、图标和提示来自 HubModel，贴底部角时顺序反转；面板尺寸按 `HubRect`，包含速拨区域；`acceptsFirstMouse = true`；
   - `registerForDraggedTypes` 接收拖入；
+  - 单击（没有拖动）走 NewFromHub：剪贴板里是 PinCC 上次读写剪贴板之后新复制的图片（位图且没有非空白文字，或全是图片文件）时，每张图片直接建一张 1:1 图片卡片（一个操作组，最多 12 张），角标“剪贴板图片 · 再点 + 新建空白卡片”；否则新建空白卡片并进入编辑。同一次复制只贴一次，再点就是空白卡片。“新”和读取的做法见 §8.8；
   - macOS 26 及以上用 NSGlassEffectView，更早用 NSVisualEffectView。Liquid Glass 只用在控件层，卡片属于内容层，不用。
 - **ToastPanel（提示条）**：不激活，`canBecomeKey = false`，材质背景，位置取 `Layout.Spot`；显示 4 秒，悬停时暂停，点击关闭，与 Windows 相同。提示留在程序内，不用系统通知中心，保证两端布局一致。
 - **提醒和颜色选择器**：默认用**自己的不激活子面板**（`addChildWindow`，样式同卡片，可以成为 key）。NSPopover 的窗口不是 nonactivatingPanel；macOS 27 上有锚在状态项上的 NSPopover 显示时拿走系统键盘焦点的报告（Doll #75），但 PinCC 的选择器锚在卡片上，不是同一种情形。所以 P0 的 A3 比较两者：只有 NSPopover 在 PinCC 不在前台时能打字（含拼音）、又不激活程序，才改用 NSPopover；否则用子面板。卡片失去 key 时，如果新的 key 窗口是自己的子面板，就不退出编辑（对应 Windows 的 IsOwnedBy）。“设定”是回车默认按钮。
-- **菜单**：MenuSpec 生成 NSMenu，通过 `menu(for:)` 提供，⌃点按和双指点按也能打开；SF Symbols 图标，快捷键显示来自 KeyBindings.Mac；单选项 `state = .on`；透明度改成“透明度 ▸”子菜单（100/90/80/70/50，当前值打勾）。
+- **菜单**：MenuSpec 生成 NSMenu，通过 `menu(for:)` 提供，⌃点按和双指点按也能打开；SF Symbols 图标，快捷键显示来自 KeyBindings.Mac；单选项 `state = .on`；透明度改成“透明度 ▸”子菜单（100/90/80/70/50，当前值打勾）。有任务的卡片菜单里有“添加一项”；卡片菜单里 ✨ 那一项的文字随技能变（内置 summary 是“摘要 / 重新摘要”，其余是技能的 label），“技能 ›”子菜单列出其余匹配这张卡片的 card 技能；+ 的右键菜单“技能 ›”列出所有 desk 技能（§4.2.10，Desk.cs 的 CardMenu、HubMenu）；项目来自 MenuSpec。
 
 ### 8.6 设置与卡片库
 
@@ -928,6 +998,8 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 - **设置（⌘,）**：通用、快捷键、AI 摘要、外观四页，全部由 SettingsSchema 生成；改动立即生效；⌘W 关闭；记住上次打开的页。
   - 只显示作用域为共享和 Mac 的项；不显示 WSL 和发行版，改为显示捕获到的登录 shell（例如“/bin/zsh 登录环境”）；
   - 新增“命令行”一行，用来安装 `pincc`；
+  - AI 摘要页的工具列表来自执行器文件（内置和 `agents/`），运行环境一行只显示本机的登录 shell；
+  - “技能与执行器”一节（与 Windows 的 ManageWindow.cs 相同）：列出技能和执行器，含来源（内置 / 用户）、范围、触发、授权、是否已确认和解析错误；按钮“打开技能文件夹”“打开执行器文件夹”（不存在时先建，用 `NSWorkspace.open` 打开）、“重新加载”、“复制给 agent 的 SKILL.md”（即 `help --skill` 的内容）；说明文字里的路径写法用 Mac 的 `/`；
   - 所有写入经带类型的设置接口（§4.2.4）。
 - **卡片库（⌘F）**：NSSearchField 搜索，带计数的分段过滤，列表（历史可以展开）。Esc 清空搜索框（Mac 上 Esc 不关闭窗口）。
 - 两个窗口打开期间都是 `.floating` 层级，居中显示在鼠标所在屏幕的 visibleFrame 上。
@@ -952,9 +1024,14 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
   6. 纯文本。
   结果统一成 ClipPayload，交给 ClipIngest.plan。来源网址是尽力而为，已记录为差异。
 - **剪贴板隐私**：macOS 15.4 起有 `NSPasteboard.accessBehavior`，默认“程序读取时询问”；“既是用户发起、又与粘贴相关”的读取不提示。全局热键在后台“用剪贴板新建”很可能不算粘贴相关，会弹提示。做法：读取前检查 `accessBehavior`，先用 detect 接口判断内容类型；首次运行的提示条告诉你可以在系统设置里选“始终允许”；优先引导用 + 按钮后 ⌘V 这类粘贴路径。哪一版 macOS 开始实际弹提示未查证，P0 实测。
+- **剪贴板是否“新”**（+ 贴图用，ClipData.cs 的 `Fresh`、`MarkUsed`）：
+  - Windows 比较 `GetClipboardSequenceNumber` 和进程内记下的序号；PinCC 每次读剪贴板（`ClipData.Current`：粘贴、用剪贴板新建、+ 贴图、编辑框粘贴）和每次写（卡片上 Ctrl+C）之后都记下当时的序号。Mac 用 `NSPasteboard.general.changeCount` 做同样的事。记下的序号只在内存里，启动时为“从未使用”，所以启动前复制的图片在第一次点 + 时也算新（与 C# 的初值 0 相同）。
+  - 点 + 时：`changeCount` 与记下的不同，才看类型、读数据；判断规则是可移植的 `ClipIngest.pictures`：有文件 URL 时只有全是图片文件才算（最多 12 个）；否则有非空白的文字（`public.utf8-plain-text`）就不算，Office、浏览器复制选区时文字和位图同时存在，按文字处理；否则取位图（PNG 优先，其次 TIFF，HEIC 转码）。
+  - 只看 `changeCount` 和类型是否会触发隐私提示待实测（预期不会）；读数据可能触发。点 + 是你发起的，但不是“粘贴”，未必免提示，P0 A6 一起测。被拒绝时按 §1.4 的登记，退回新建空白卡片。
+  - 访达里拷贝文件时，剪贴板里除了文件 URL 还有文件名文字和文件图标的 TIFF，所以必须先看文件 URL（与 C# 的顺序相同），否则拷贝一个 PDF 会贴出它的图标。Safari、Chrome 的“拷贝图像”是否同时放了文字（例如图片网址）待实测：如果放了，按现在的规则 Mac 上点 + 不会贴图，这要先在 C# 里改规则（§5.15），不能在 Mac 上单独放宽。
 - **图片转码**：HEIC/HEIF/AVIF 用 CGImageSource / CGImageDestination 转成 PNG（或 JPEG），**把 EXIF 方向应用到像素**，不保留方向标记，这样 Windows 显示的方向与 Mac 相同（WPF 忽略方向标记，Desk.cs:334-336、1273-1283）。
-- **写入**：先 `clearContents()`；纯图片卡片写 PNG 数据加文件 URL；其余卡片写纯文本（正文 + 摘要），与 Windows 的 Desk.Copy 相同；编辑状态下的 ⌘C 交给 NSTextView。
-- **截图流程**：⌃⇧⌘4 截到剪贴板，点 + 新建卡片，按 ⌘V。
+- **写入**：先 `clearContents()`；纯图片卡片写 PNG 数据加文件 URL；其余卡片写纯文本（正文 + 摘要），与 Windows 的 Desk.Copy 相同；写完记下 `changeCount`，自己拷贝出去的图片不算“新”；编辑状态下的 ⌘C 交给 NSTextView。
+- **截图流程**：⌃⇧⌘4 截到剪贴板，点 + 直接成为 1:1 图片卡片（与 Windows 相同）；正在编辑一张卡片时按 ⌘V，截图加进这张卡片的图片（§8.3）。
 - **拖入**：+ 按钮和卡片注册 `.fileURL`、`.URL`、`.string`、`.png`、`.tiff`、`.html`、`org.chromium.source-url`，与粘贴共用 ClipPayload。
 - **拖出图片**：⌥-拖动（Mac 上 ⌃点按等于右键，⌥ 在拖动时本来就表示拷贝）。拖动会话携带文件 URL，操作类型 `.copy`。
 
@@ -988,12 +1065,14 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 - 按档位解码（最大边为显示宽度 × backingScaleFactor），结果放在有成本上限的 NSCache；`viewDidChangeBackingProperties` 时重新解码。
 - 缩放：触控板捏合（每次捏合一个撤销组，增量累计成与滚轮相同的档位）或滚轮；1:1：⌘0、双指轻点两下，或三键鼠标中键；双击用“预览”打开。
 - “1:1 像素”的换算写成 `像素 ÷ backingScaleFactor` 个 point；共享代码里用 `Work × PixelScale ÷ Scale` 的形式，两端都对（ZoomActual、NaturalSize、解码宽度）。
+- **悬停操作行的底板**：图片卡片的操作行浮在图片底部。原来只是一条透明到黑的渐变，在亮、花的图片上看不清；现在是一块左右留边的圆角深色半透明底板（CardWindow.xaml 的 `Bar`：高 34、左右和下边距 6、圆角 10、`#E0202428`、1 px 的 `#40FFFFFF` 细亮边、模糊 12 偏移 2 不透明度 0.4 的向下阴影；操作行本身左右和下边距 9），按钮和标签用白色，悬停底色改为白色 18%（Theme.xaml 的 `Card.Hover` 资源）。按钮的前景色跟随所在行的墨色（Theme.xaml 的 `Card.Chip`、`Card.Action` 绑定到所在 Panel 的前景色）：底板上是白色，其余是卡片的墨色；C# 顺带修正了按钮原来被系统 Button 样式强制成黑色、墨炭色卡片上看不清的问题。Mac 上按钮的着色同样只取 CardScene 给的墨色，不用系统默认的标签色。只在悬停或到期时显示，与操作行同进同出。Mac 用一个 CALayer 画底板（不用 NSVisualEffectView，保证颜色与 Windows 相同，也能被 `render(in:)` 画进离屏截图）；阴影用 `shadowPath`，`render(in:)` 是否画图层阴影在 P0 S5 一起确认，不画时 verify 模式里省略阴影。数值属于样式，以 XAML 为准，由台账的 CardWindow.xaml 整文件哈希跟踪（§5.11）。
 
-### 8.13 AI 工具（ToolHost.Mac）
+### 8.13 AI 工具与技能（ToolHost.Mac）
 
+- **按执行器文件运行**（§4.2.10）：执行器来自 `builtin/agents` 和数据目录的 `agents/`。Mac 没有 WSL，运行环境只有“本机”：执行器的 `command` 在你登录 shell 的 PATH 里找，这与 Windows 上 WSL 用 `LoginEnv` 捕获 PATH 和代理是同一个道理，只是换成本机的 shell（下一条）。设置只用 `mac.llm.tool`（执行器名或 `custom`）、`mac.llm.model`、`mac.llm.custom`、`mac.llm.env`。首次检测按执行器的 `priority` 再按名字（内置 claude、codex、gemini、qwen、llm、ollama，用户执行器也参与）取第一个装了的；`requiresModel` 的执行器（ollama）用 `listModels` 挑一个模型，规则同 Llm.cs 的 `Detect`（跳过表头行，取第一列，过模型名校验）。技能的 `runner` 与设置里的执行器不同时，用这个名字加本机环境构造执行器，设置里的模型不沿用，找不到就报错。
 - **必须捕获登录 shell 的环境**：从访达、Dock 或登录项启动的程序，PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`。做法：从 `getpwuid` 取你的 shell（默认 /bin/zsh）；执行 `<shell> -l -i -c 'printf 标记; /usr/bin/env'`，关闭 stdin，期限 15 秒；用与 WSL 相同的标记解析器和白名单（PATH、NVM_BIN、代理等）提取，保存为 `mac.llm.env`。启动时在后台做一次，点“检测”时再做一次。
-- **启动顺序**：首次检测、补做摘要和自动摘要都要等环境捕获完成，或先用上次保存的 `mac.llm.env`。捕获失败时退回“进程 PATH + `/etc/paths`、`/etc/paths.d/*` + 下表目录”，这次不写 `mac.llm.detected`。
-- **查找工具**：按 `:` 分割 PATH 并检查可执行权限，另外探测：
+- **启动顺序**：首次检测、补做摘要和自动运行的技能（`on` 含 `create`）都要等环境捕获完成，或先用上次保存的 `mac.llm.env`。捕获失败时退回“进程 PATH + `/etc/paths`、`/etc/paths.d/*` + 下表目录”，这次不写 `mac.llm.detected`。
+- **查找执行器的 `command`**（取数步骤的程序同样）：按 `:` 分割 PATH 并检查可执行权限，另外探测：
 
 | 位置 | 说明 |
 |---|---|
@@ -1003,7 +1082,21 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 | `~/.claude/local`、`~/.npm-global/bin`、`~/.volta/bin`、`~/.bun/bin`、`$NVM_BIN` | 其他常见安装位置 |
 | Ollama.app 内置路径 | Ollama 自带的命令行 |
 
-- **启动子进程**（Proc.swift）：npm 装的工具是 `#!/usr/bin/env node` 脚本，直接执行；自定义命令用 `[shell, -c, 命令]`；缺 LANG 时补 `LANG=en_US.UTF-8`；保留 NO_COLOR、TERM=dumb、PYTHONUTF8、PYTHONIOENCODING；去掉 WSL_UTF8 和 WSLENV；超时 150 秒；子进程在自己的进程组里，超时和退出时 killpg。
+- **启动子进程**（Proc.swift）：npm 装的工具是 `#!/usr/bin/env node` 脚本，直接执行；自定义命令用 `[shell, -c, 命令]`；缺 LANG 时补 `LANG=en_US.UTF-8`；保留 NO_COLOR、TERM=dumb、PYTHONUTF8、PYTHONIOENCODING；去掉 WSL_UTF8 和 WSLENV；超时 150 秒；子进程在自己的进程组里，超时和退出时 killpg。执行器参数按 §4.2.10 展开：`{grants}` 换成这次运行所需授权的参数，`{model}` 换成 `model` 模板；提示词先按 `promptEscapes` 替换，只经标准输入送入。
+- **授权翻译**（纯函数，§5.3 向量）：
+  - `none`、`web` 只加执行器的参数；
+  - `read`：工作目录 = 文档所在文件夹（文件卡片的路径，或下载到 `files/` 的文档），读受保护文件夹的授权算在 PinCC 头上（下面“隐私权限”一条）；
+  - `shell:<前缀>`：用执行器的 `shell` 键，`{prefix}` 换成前缀，前缀先过 §4.2.10 的校验；
+  - `pincc` = `shell:<PINCC_EXE>`，并设置 `PINCC_GROUP`。Mac 的 `PINCC_EXE` 是 `Contents/Helpers/pincc` 经 realpath 的绝对路径，不是 `~/.local/bin` 里的符号链接，也不是 `MacOS/PinCC`。路径含空格（.app 放在带空格的文件夹里）时，claude 的 `Bash(前缀:*)` 能否匹配带引号的命令待实测，不行就在设置页提示把 PinCC.app 放进 `/Applications`。claude 的前缀放行只认这个完整路径（Windows 上已实测：模型写成短名会被拒），所以附在提示词后的 `PinccNote` 要求每条命令都以它开头、不用变量或别名；Mac 上这段说明里的路径就是上面的 `Helpers/pincc`，它和 `help --skill` 一样是命名的平台片段。
+  - 几个授权按顺序拼接各自的参数；claude 的 `--tools` 重复出现时会累加（Windows 上已实测 Read 和 Bash 同时生效），Mac 上同一版本的 claude 行为应相同，P10 抽查一次。
+- **取数步骤**（`context`，依次执行，输出拼成 `{content}`）：
+  - `run`：`where` 为 `runner`（默认）时在本机执行，与执行器同一个登录 shell 环境；参数经占位符替换后仍是独立参数，posix_spawn 直接执行，不经 shell；超时默认 60 秒，可由 `timeout` 改；退出码非 0 或没有输出时技能失败，显示“<程序> 失败：”加它的错误输出（去 ANSI、Tail 300，同 `Outcome`）；`where` 为 `windows`、`wsl` 时报错（§1.4）；
+  - `builtin`：`source` 与 GUI 的读取相同（抓取、无头渲染、隐私守卫、按需让模型自己读的降级）；`note` 是卡片正文去掉来源行；`desk` 等同 `pincc list --md`。
+- **环境变量**：模型和每个取数步骤都合并进 §4.2.10 的 `PINCC_*` 变量。路径就是 Mac 的 POSIX 路径，不做 `/mnt/…` 转换，不设 `WSLENV`；`PINCC_HOME` 只在你设置了它时传。
+- **确认对话框**：用户技能含 run 步骤或 `none` 以外的授权、`skill.ok.<名字>` 又不等于当前内容的哈希时，你点 ✨ 或菜单运行它之前弹出确认。内容照 Desk.cs 的 `Confirm`：技能名和说明、PinCC 先执行的命令（`SkillRun.Describe`，Windows 在命令后注明“WSL”“Windows”，Mac 不需要）、用文字说明的授权（上网读取网页、读取文档所在文件夹里的文件、调用 PinCC 命令行读写卡片、运行以某前缀开头的命令）、执行器、SKILL.md 的路径和“改动后会再次确认”；Windows 是“是 / 否”对话框，默认“否”。PinCC 是 `.accessory` 程序，确认窗口期间临时切到 `.regular` 并激活（同设置窗口，§8.1），关闭后交还焦点；用程序自己的窗口还是 NSAlert 的 `runModal`，P10 定。确认后写 `skill.ok.<名字>`。自动运行从不弹确认，未确认的技能直接跳过；`pincc run` 不需要确认。
+- **并发与超时**：沿用 Llm.cs 的全局 2 个并发，只限模型，取数步骤不占名额；模型 150 秒，取数步骤默认 60 秒；每个子进程在自己的进程组里，超时、取消和退出时 killpg（§7 Proc）；运行期间持有 `beginActivity`（§8.10）。
+- **写回和记录**：`output` 为 summary 时写卡片摘要，按输入哈希防过期（同原来的摘要）；append 追加到正文末尾；cards 按单独一行的 `---` 切分，每段一张新卡片；none 只提示结果，写回由模型自己经 `pincc` 完成。写回与 run 标记在同一个操作组，⌘Z 撤销整次运行。每次调用模型后向数据目录的 `runs.log` 追加一行（`O_APPEND`，一行一次 `write(2)`；超过 1,000,000 字节时只留最后 500 行，先写临时文件再改名；写失败不影响运行，同 C# 的 `RunLog`）。
+- **命令行 `pincc run`**：同一条管线（PinCCCore 的 SkillRun）；环境取保存的 `mac.llm.env`，没有时用进程自己的环境（从终端启动时本来就是登录环境）；不弹确认。`builtin: source` 需要无头渲染时，`Helpers/pincc` 不链接 AppKit 和 WebKit，只能用 Chrome/Edge 的 `--dump-dom`；两者都没有时怎样处理（交给正在运行的 GUI，或按渲染失败处理）P5 定，定下后登记进 §1.4。
 - **隐私权限（TCC）**：读 `~/Documents`、`~/Desktop`、`~/Downloads` 会弹一次授权，子进程的访问也算在 PinCC 头上；拖入文件属于隐含同意；RefreshFiles 和 CLI 添加的文件卡片会触发授权。拒绝授权时卡片显示“需要授权”，不显示“文件缺失”，摘要也不标为过时（运行时状态，不写 meta）。
 - **不开 App Sandbox**：沙盒会继承给子进程，claude、codex 读不了自己的配置。所以不上 Mac App Store。
 
@@ -1017,13 +1110,14 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 
 - `Helpers/pincc` 是独立的 Mach-O，只链接 PinCCCli；`MacOS/PinCC` 带 CLI 参数时也在进程内走 CLI。都始终输出 UTF-8，退出码直接交给 shell。
 - “安装命令行工具…”：把 `Helpers/pincc` 符号链接到 `~/.local/bin`（并在 `~/.zprofile` 加一行 PATH），或 `/usr/local/bin`（需要管理员授权）。
-- 帮助的平台片段：`pincc` 和 zsh 的示例，数据目录写 `~/Library/Application Support/PinCC`。
+- 帮助的平台片段：`pincc` 和 zsh 的示例，数据目录写 `~/Library/Application Support/PinCC`。`help --skill` 输出的通用 SKILL.md 用同样的平台片段（没有“从 WSL 调用”那一段），可以存进各 agent 的技能目录，例如 `pincc help --skill > ~/.claude/skills/pincc/SKILL.md`。
+- 新命令和参数与 Windows 相同（§4.2.8）：清单的 `--add-task`、`--check`、`--uncheck`，执行器和技能的 `skills`、`run`、`help --skill`；`PINCC_GROUP` 由 CLI 读取（§4.2.3）。内置执行器和技能嵌入在 `pincc` 里（§5.1），所以经符号链接调用时也不需要找 .app；用户文件在 `Home.resolve()` 下的 `agents/`、`skills/`。
 - P0 测量冷启动时间，并确认不闪 Dock、输出 UTF-8、退出码正确。
 
 ### 8.16 数据、日志与缓存目录
 
 - 数据：`Home.resolve()`。正式版默认 `~/Library/Application Support/PinCC`；开发版默认 `~/Library/Application Support/PinCC.dev`；两者都可用 `PINCC_HOME` 覆盖。是否开发版是**构建时常量**：`tools/mac.sh app` 生成 `BuildChannel.swift`（或传 `-Xswiftc -DPINCC_DEV`），GUI 和 `Helpers/pincc` 来自同一次构建，`Home.resolve()` 只读这个常量，运行时不读 bundle id（`Helpers/pincc` 是独立的 Mach-O，经 `~/.local/bin` 的符号链接调用时也看不到 .app 的 bundle id）。否则开发版和正式版共用一个数据库：正式版运行时开发版拿不到锁，发出的 `….dev.Show` 没人接收，直接退出；正式版没运行时开发版改的是真实数据，开发中的新格式一旦写进 `user_version`，正式版只能只读打开（Store.cs:61）。
-- Mac 只在数据目录里建 `.instance`（§4.1），不建 edge/、llm/、error.log、shadow.log。
+- Mac 在数据目录里只建 `.instance`、`runs.log`（GUI 和 `pincc run` 都写，格式两端相同）和你打开技能、执行器文件夹时的 `agents/`、`skills/`（§4.1），不建 edge/、llm/、error.log、shadow.log。
 - 日志：`~/Library/Logs/PinCC/error.log`、`shadow.log`（若有）。
 - 缓存：`~/Library/Caches/PinCC`（渲染器配置、LLM 工作目录），Time Machine 按惯例不备份。
 - 程序不在沙盒里，GUI 和 CLI 共用同一个数据库。
@@ -1062,7 +1156,11 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 | 全屏 | 每秒轮询前台窗口，卡片退到全屏窗口后面，隐藏 + | 全屏应用在单独的空间里，卡片天然不出现；检测只用来隐藏 + 和推迟提醒声 |
 | 屏幕与缩放 | 物理像素，PerMonitorV2，跨 DPI 两步放置，DeferWindowPos | point，翻转一次坐标，Work 取 visibleFrame，一个 CATransaction |
 | CLI | `PinCC.exe`：管道和文件输出 UTF-8，交互式控制台用 UTF-16；HKCU PATH 安装 | `pincc`（Helpers 里的独立程序），始终 UTF-8，链接到 `~/.local/bin` 或 `/usr/local/bin` |
-| AI 工具 | 注册表 PATH、.cmd 走 cmd.exe、可选 WSL、Job 对象，存 `llm.*` | 登录 shell 环境、探测 Homebrew、直接执行、进程组 + killpg，存 `mac.llm.*` |
+| AI 工具与技能 | 执行器和技能文件；运行环境 Windows 或 WSL（发行版 + 登录 shell 的 PATH 和代理），注册表 PATH、.cmd 走 cmd.exe、Job 对象，存 `llm.*` | 同样的执行器和技能文件；运行环境只有本机（登录 shell 环境），探测 Homebrew、直接执行、进程组 + killpg，存 `mac.llm.*`；`where` 为 windows/wsl 的取数步骤不能运行 |
+| 技能的确认 | MessageBox“是 / 否”（默认“否”），记在 `skill.ok.<名字>` | 临时切到 `.regular` 的确认窗口或 NSAlert，同一个设置键 |
+| + 按钮单击 | 剪贴板有新图片时贴成 1:1 图片卡片；按 `GetClipboardSequenceNumber` 判断“新” | 同样；按 `NSPasteboard.changeCount` 判断，读取可能弹隐私提示，被拒绝时新建空白卡片 |
+| 编辑框粘贴图片 | 编辑器自己处理 Ctrl+V、Shift+Insert（TextBox 只粘贴文字） | 重写 `readablePasteboardTypes` 和 `paste(_:)` |
+| 图片卡片的操作行 | 浮在图片底部的深色半透明圆角底板，Border + DropShadowEffect | 同样的底板，CALayer + shadowPath |
 | 抓取 | HttpClient；`msedge --headless=new --dump-dom` | URLSession（同样的规则）；Chrome/Edge 或屏幕外 WKWebView |
 | 数据 | `%LOCALAPPDATA%\PinCC`，同一数据格式 | `~/Library/Application Support/PinCC`，同一数据格式；受保护文件夹首次访问时弹授权 |
 | 分发 | 单文件 exe（依赖框架版和独立版） | 通用 .app，稳定的自签名身份；给别人用时需要 Developer ID 和公证 |
@@ -1092,6 +1190,7 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 | 任务清单项 / 普通列表项 | Ctrl+L / Ctrl+Shift+L | ⇧⌘L / ⇧⌘8 |
 | 续列表 / 缩进 / 取消缩进 | Enter / Tab / Shift+Tab | Return / Tab / ⇧Tab（输入法提交后才生效） |
 | 双击下边缘 | 恢复自适应高度 | 同样恢复自适应高度 |
+| 清单快速添加 | 点 ☑ 进度标签或菜单“添加一项”；Enter 加一项，Esc 或空行 Enter 结束 | 同样；Return 加一项（输入法提交后才生效），Esc 或空行 Return 结束 |
 
 Mac 上额外的规则（由表完整性测试检查）：卡片和编辑器都不绑定 ⌃+字母；⌘D、⌘H、⌘M 不用于删除或隐藏（⌘H 会连到期卡片一起隐藏，所以“最小化全部”在程序内部实现）；在卡片上按 ⌘W 不做任何事；所有全局热键都必须含 ⌘ 或 ⌃。
 
@@ -1249,7 +1348,7 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 - `tests/Vectors` 框架：JSONL 写入、UTF-16 和 base64 编码、文件头（含 ICU、winsqlite3、运行时版本）、SplitMix64、`--expect`、语义摘要、覆盖率统计。
 - .NET 基础语义表（§5.2）。
 - 数据表导出（§5.1）：在 `tests/PinCC.Tests.csproj` 里加入 Hotkeys.cs、Palette.cs、ClipData.cs；方法体内字面量表的词法抽取器；集合字面量扫描（含 `is … or …` 模式和 switch 的字符串分支）。正则清单和按行计数的源码扫描门槛（§5.4）。
-- 首批向量族：Card 派生状态、Hash、Tag、AutoColor；Card 和 CardMeta 的 JSON 字节和宽容读取；Markdown 全家；When（这时只做显式传入“现在”的单元）；TextDecode；UrlGuard；Host；WinPath；HtmlDecode；FromHtml 和 MainText（保存的网页语料）；固定文件夹上的文件信息；Llm 纯函数；用反射调用的 Cli 私有辅助函数。
+- 首批向量族：Card 派生状态、Hash、Tag、AutoColor；Card 和 CardMeta 的 JSON 字节和宽容读取；Markdown 全家；When（这时只做显式传入“现在”的单元）；TextDecode；UrlGuard；Host；WinPath；HtmlDecode；FromHtml 和 MainText（保存的网页语料）；固定文件夹上的文件信息；Llm 纯函数；用反射调用的 Cli 私有辅助函数；清单辅助函数（§5.3 的新增族）；执行器和技能的纯函数（C# 实现定稿之后，§4.2.10）。台账加 `builtin/` 的目录哈希（§5.11）。
 - `tests/Ledger`：按词法工作的成员扫描器、变异自测、初始台账（全部标为 pending 或 platform-only），以及 XAML 整文件哈希、生成环境指纹、词法抽取段哈希这几类非成员条目（§5.11）。
 - 数据字典扫描（C# 一侧）。
 - `oracle/wpf`：OracleWpf 的卡片渲染（§5.9 的工程要求和哨兵检查：不调用 Desk.Start 和任何会走到 DoLayout 的方法，不建卡片的 HWND，对 `Surface` 做 Measure/Arrange；导出 `Desk.Readable`、菜单规格和图标；W1c 之前先在 OracleWpf 里临时复制 App.cs:18-21 的两行，W1c 之后改为调用 `App.Configure`，台账跟踪这两行）。
@@ -1303,7 +1402,7 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 
 #### P5 · Swift core 其余部分与 CLI（13 天）
 
-**工作**：When；Markdown；TextDecode；HtmlExtract 和 JsonLd；UrlGuard；FileFacts 和 ZipReader；WebRoute；Llm（纯函数）；Proc 和辅助子进程契约测试；PinCCCli 和 `pincc`；`pincc doctor`；main.swift 的 CLI 路径；`pincc-selftest`（不依赖 XCTest，跑全部向量族、操作脚本和 CLI 录制，供不能编译的 Intel Mac 原生运行，§3.2、§9.1）。
+**工作**：When；Markdown（含清单辅助函数）；TextDecode；HtmlExtract 和 JsonLd；UrlGuard；FileFacts 和 ZipReader；WebRoute；Llm（纯函数）；Agents、Skills、SkillRun 和生成的内置文件（§4.2.10，用假执行器测管线）；Proc 和辅助子进程契约测试；PinCCCli 和 `pincc`（含清单参数、`skills`、`run`、`help --skill`、`PINCC_GROUP`）；`pincc doctor`；main.swift 的 CLI 路径；`pincc-selftest`（不依赖 XCTest，跑全部向量族、操作脚本和 CLI 录制，供不能编译的 Intel Mac 原生运行，§3.2、§9.1）。
 
 **验证**：核心向量族在 WSL 和两台 Mac 上全部通过（Intel Mac 不能编译时经 `tools/mac.sh test --intel` 运行 `pincc-selftest`）；CLI 录制 × {win, mac} 样例 × {C#, Swift 进程内, Swift 子进程} 在规范化后相同；Proc 契约测试在 WSL 和两台 Mac 上通过。
 
@@ -1330,7 +1429,7 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 
 **前提**：你对 §12 第 14 条的回答（EditorOps 向量的形状）。
 
-**工作**：Rules；LayoutPass；DeskCore（EditSession、UndoStack、GestureClock、按 Id 有序的注册表）；CardPresenter → CardScene；EditorOps；MdRender；HubModel、选择器、卡片库、SettingsSchema（作用域和取值语法守卫）；KeyBindings；MenuSpec；ClipIngest；DataRules 的异机路径运行时状态；每一行转移的 FakeHost 场景；轨迹重放工具。
+**工作**：Rules；LayoutPass；DeskCore（EditSession、AddSession、UndoStack、GestureClock、按 Id 有序的注册表；NewFromHub、技能的 ✨、自动运行、菜单和写回）；CardPresenter → CardScene（含清单和图片底板的新状态）；EditorOps；MdRender（含折叠行）；HubModel、选择器、卡片库、SettingsSchema（作用域和取值语法守卫）；KeyBindings；MenuSpec；ClipIngest（含 pictures、editorPaste）；DataRules 的异机路径运行时状态；每一行转移的 FakeHost 场景；轨迹重放工具。
 
 **验证**：Rules、LayoutPass、场景、Markdown、菜单向量在 WSL 和两台 Mac 上通过（实测字段按 §5.9 的规则）；FakeHost 场景通过；已有的 Windows 轨迹从起始快照开始重放，批量命令和布局按轨迹里录下的 `_cards` 顺序（“注册表顺序”参数，§5.10 第 5 条），完整转储逐字节相同。
 
@@ -1346,7 +1445,7 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 
 #### P9 · Mac 交互对齐（8 天）
 
-**工作**：转移表里的每个手势：撤销条、临时展开、胶囊、缩放（触控板增量累计成滚轮档位）、显式拖动和缩放（KeepAspect）、透明度（⌘+滚动）、单卡命令、批量命令、提醒（只响一次、每批一声、全屏推迟）、提醒和颜色选择器（默认子面板，以 P0 的 A3 为准）、由 MenuSpec 生成的菜单、卡片库和历史、§8.19 的 Mac 快捷键。
+**工作**：转移表里的每个手势：撤销条、临时展开、胶囊、缩放（触控板增量累计成滚轮档位）、显式拖动和缩放（KeepAspect）、透明度（⌘+滚动）、单卡命令、批量命令、提醒（只响一次、每批一声、全屏推迟）、提醒和颜色选择器（默认子面板，以 P0 的 A3 为准）、由 MenuSpec 生成的菜单、卡片库和历史、§8.19 的 Mac 快捷键；清单的快速添加（§8.3）、折叠行（§8.4）、常驻的 ○ 和胶囊的下一项（§8.2）。
 
 **验证**：FakeHost 场景；两台 Mac 上按 docs/mac-port.md 的清单手工检查：
 - 卡片和提醒选择器里都能用拼音输入；Esc 后回到之前的程序；点卡片的正文、角标、图片、空白处都能让卡片成为 key；
@@ -1356,13 +1455,14 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 - ⇧⌘X、⌥⌘C、⇧⌘L、⇧⌘8 没有被系统、输入法或常用程序占用；
 - Safari 全屏所在的空间里没有卡片，提醒声被推迟；
 - 卡片全部被挡住 10 分钟后提醒仍在 1 秒内触发；全屏应用在前台、全部最小化时也一样；睡眠唤醒后也一样（§8.10）；
-- 撤销条、临时展开、胶囊状态的 verify 场景与 Windows 相同。
+- 撤销条、临时展开、胶囊状态的 verify 场景与 Windows 相同；
+- 快速添加时用拼音输入，选词的回车不加项；连续加三项后 ⌘Z 一次撤掉三项；失去焦点时已输入的文字保留；输入期间卡片不被平铺挪走。
 
 **完成标准**：每一行转移在两台 Mac 上都已通过；除声明的差异外没有未解决的行为差异；如果你同意了 W4c，每一行转移都至少被一条真实轨迹命中，或者已按 §5.10 第 4 条由你签字豁免、在 desk-transitions.md 里标为“只由 FakeHost 场景覆盖”。
 
 #### P10 · Mac 系统功能（9 天）
 
-**工作**：Carbon 热键和录入（`mac.hk.*`、KnownConflicts.Mac）；剪贴板、拖入拖出、HEIC 转码（方向写进像素）、accessBehavior 提示；URLSession 抓取；WebKitRenderer；ToolHost.Mac（登录 shell 环境、`mac.llm.*`）；SMAppService（`mac.autostart.asked`）；提示音；唤醒、时钟、时区通知（重置时区缓存）；桌面空间和全屏；经 button 的状态栏图标；SwiftUI 设置和卡片库；“安装命令行工具”；数据目录位置检查（§4.2.9）。
+**工作**：Carbon 热键和录入（`mac.hk.*`、KnownConflicts.Mac）；剪贴板、拖入拖出、HEIC 转码（方向写进像素）、accessBehavior 提示；URLSession 抓取；WebKitRenderer；ToolHost.Mac（登录 shell 环境、`mac.llm.*`、按执行器文件运行、取数步骤、授权翻译、`PINCC_*` 环境变量、确认对话框，§8.13）；设置页的“技能”一节；+ 贴图和编辑框粘贴图片（§8.3、§8.8）；图片卡片的操作行底板（§8.12）；SMAppService（`mac.autostart.asked`）；提示音；唤醒、时钟、时区通知（重置时区缓存）；桌面空间和全屏；经 button 的状态栏图标；SwiftUI 设置和卡片库；“安装命令行工具”；数据目录位置检查（§4.2.9）。
 
 **验证**：回环 HTTP 录制服务器的 Mac 测试；从访达启动后的手工检查：
 - “检测”在两台 Mac 上都能在正确的 Homebrew 目录下找到 claude、codex、ollama，首次运行也能找到用 nvm 装的工具；
@@ -1370,7 +1470,9 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 - 被别的程序占用的热键会被报告；
 - ⌃⇧⌘4 截的图能粘贴进新卡片；从 Safari 拖进来的链接保留标题和网址；从 Safari 和 Chrome 复制文字后粘贴都记下来源网址；
 - 安装后新开的终端里 `pincc` 可用；登录项开关与系统设置一致；
-- 在 Mac 上写的笔记摘要到 Windows 上不显示为过时。
+- 在 Mac 上写的笔记摘要到 Windows 上不显示为过时；
+- ⌃⇧⌘4 截图后点 + 成为 1:1 图片卡片，再点 + 是空白卡片；卡片上 ⌘C 之后点 + 是空白卡片；访达里拷贝一个 PDF 后点 + 是空白卡片、拷贝两张 PNG 后点 + 是两张图片卡片；编辑中按 ⌘V 贴截图；
+- 从访达启动后，一个带 `pincc` 授权的用户技能：先弹确认，模型按完整路径调用 `pincc` 写的卡片和写回在同一组，⌘Z 一次撤销；`where` 为 wsl 的技能给出 §1.4 登记的提示。
 
 **完成标准**：功能完整。L1 手工往返在真实数据上通过：Windows → Mac → Windows 搬一次，卡片、图片、撤销、摘要不过时、各作用域设置不被改动、异机文件卡片显示标记且 meta 不被改写。
 
@@ -1378,7 +1480,7 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 
 **前提**：你对 §12 第 5 条的回答。
 
-**工作**：W5（C# 先实现 `export`、`import`，GUI 启动时建按数据目录命名的互斥量，`Cli.GuiRunning` 接缝），再实现 Swift 的 Bundle 和 CLI 命令；GUI 运行时拒绝导入（两端都按数据目录判断）；包用建表语句加 `ATTACH` 和 `INSERT … SELECT` 生成，敏感设置和本机作用域的键从不写进包；交接检查和 `--force`；首次导出时生成 `db.id`；录制和交替读写覆盖；`docs/DATA-MOVE.md`（导出导入、退出后复制整个目录、永远不放进云同步文件夹）；可选的 Windows 端位置警告。
+**工作**：W5（C# 先实现 `export`、`import`，GUI 启动时建按数据目录命名的互斥量，`Cli.GuiRunning` 接缝），再实现 Swift 的 Bundle 和 CLI 命令；GUI 运行时拒绝导入（两端都按数据目录判断）；包用建表语句加 `ATTACH` 和 `INSERT … SELECT` 生成，敏感设置和本机作用域的键从不写进包；交接检查和 `--force`；首次导出时生成 `db.id`；用户的 `agents/`、`skills/` 按 §12 第 15 条的决定进包或不进；录制和交替读写覆盖；`docs/DATA-MOVE.md`（导出导入、退出后复制整个目录、永远不放进云同步文件夹）；可选的 Windows 端位置警告。
 
 **验证**：Windows 导出 → Mac 导入和反向，在 WSL 交替读写和两台 Mac 的样例上都通过；导入后的转储除本机作用域和本机平台的设置外与源相同；经接缝的“GUI 在运行 / 不在运行”两种录制，测试从不创建或打开真实的互斥量；交接检查的拒绝和 `--force`、不带 `--replace` 的退出码 1；只复制 `pincc.db` 而不带 `-wal` 会丢提交、`export` 不会的反例测试；在设置里放一个已知的假密钥，导出后按字节搜索整个包文件（包括空闲页）必须找不到，两端各跑一遍。发布 W5 的 Windows 版并重启 GUI 之后，你才在真实数据上使用 import（旧版 GUI 没有按目录的互斥量）。
 
@@ -1434,6 +1536,13 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
   - P5 +1：`pincc-selftest`（§3.2、§9.1）；
   - P6 +1：W4c 记完整正文、起始快照和 `_cards` 顺序，重放工具；`Llm.PreparePrompt`、`Outcome` 的抽取（§3.5）；
   - P11 +2：按数据目录的互斥量和 `Cli.GuiRunning` 接缝、交接检查、按 `INSERT … SELECT` 生成包、密钥字节搜索测试（§4.4.1）。
+- 2026-09-29 并入的 Windows 新功能（清单增强、+ 贴剪贴板图片、编辑框粘贴图片、图片卡片的操作行底板、执行器和技能）约 +9 天，预留随之加 1 天，**尚未计入上面的表和 §0、§2.2、本章标题的数字**，等执行器和技能的 C# 规格定稿、你确认范围后一起更新（届时约 141 天，关键路径约 136 天）：
+  - P1 +1：清单、执行器和技能、ClipIngest.pictures 的向量族；`builtin/` 的台账条目（§5.3、§5.11）；
+  - P3 +1：约 30 条新 CLI 录制（含假执行器）；操作脚本的 run 标记和并组（§5.5、§5.8）；
+  - P5 +3：Agents、Skills、SkillRun、生成的内置文件；清单参数和 `skills`、`run`、`help --skill`（§4.2.8、§4.2.10）；
+  - P7 +1：NewFromHub、AddSession、技能的编排和写回、CardScene 的新状态、对应的 FakeHost 场景；
+  - P9 +1：快速添加、折叠行、常驻的 ○、胶囊的下一项；
+  - P10 +2：ToolHost 按执行器运行、确认对话框、设置页“技能”一节、+ 贴图和编辑框粘贴、图片底板（§8.3、§8.8、§8.12、§8.13）。
 - 日历时间另有：P2、W3 发布后的试用；LayoutPass 的 10 天影子期（与 P7–P10 重叠）；等待你对 §12 各条的批复；以及下面你本人要做的事。
 - 关键顺序：第 1 天 P0 ∥ P1 → P4 的 DotNetCompat 可提前开始 → 拿到批复后 P2、P3 → P4 存储、P5 → P0 结论为“继续”后 P6，影子期马上开始 → P7–P10 → P11 → P12 切换。
 
@@ -1484,6 +1593,7 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 | 自动检查碰到你的实例或真实数据（WSLENV 没传过去时，PinCC.exe 走 GUI 路径并发“显示全部”信号，或打开真实数据目录） | 卡片的屏幕外检查用 OracleWpf（没有互斥量和信号路径）；ui-snap.sh 先确认环境变量到达、否则拒绝运行，数据目录用临时目录；测试框架断言 DefaultHome 不是真实目录；从不调用 `.probe/` | — |
 | 通过 ssh 签名要解锁钥匙串，密码可能泄漏；私钥访问要弹窗授权，ssh 里弹不出来 | 专用构建钥匙串，只放自签名身份，密码存在 Mac 上的 0600 文件里；P0 在 Mac 前设好分区列表和搜索列表，S2 必须经 ssh 无弹窗通过（§9.6） | — |
 | 从 WSL 调 dotnet.exe 挂起（互操作管道） | G1：输出写文件、不接提前关闭的读取端、每次调用有超时、100 次启动的压力测试 | — |
+| 执行器和技能的 C# 实现刚落地、还在改动，它同时牵涉数据格式、CLI、子进程和安全契约 | C# 先定稿、先发布；规格里没说清的地方（§12 第 15 条及其附带问题）先在 C# 里定下再移植；`builtin/` 目录和每个成员进台账，C# 一改 Swift 就过期；Swift 在 P5 按定稿的 C# 跟进，不照文字描述提前写 | Mac 独有的环境差异（没有 WSL、PATH 来自登录 shell、TCC、`PINCC_EXE` 的路径、CLI 里没有 WebKit）只能靠 P10 的手工检查 |
 
 ---
 
@@ -1505,6 +1615,7 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 | 12 | 带 EXIF 方向标记的照片：两端都按 WPF 的方式（不旋转）显示，还是两端都改为按方向旋转（需要 Windows 改动）？ | v1 两端都不旋转，保持一致；HEIC 转码时把方向写进像素，所以从 iPhone 来的照片方向正确 |
 | 13 | 深色模式（上一版 §15 第 10 条） | Mac 的界面外框跟随系统深色，卡片保持浅色纸张感；Windows 是否也加深色外框是另一项工作 |
 | 14 | 编辑器里回车插入 CRLF（CardWindow.xaml:20），而当前行只按 `\n` 分割，所以以 CRLF 结尾的行按回车不续列表（CardWindow.xaml.cs:762-775）；经 CLI、剪贴板写入的 CRLF 正文整篇都这样。是在 C# 里修（W2m：编辑时按 LF 计算当前行），还是 Mac 照搬（Mac 回车也插入 CRLF）？P2 前需要答复，P7 依赖它 | 在 C# 里修，随 P2 一起发布；Mac 回车插入 LF，§1.4 的行尾差异只留在编辑中的缓冲区 |
+| 15 | 执行器和技能在两台电脑之间怎样共用（§4.2.10）？(a) 确认记录 `skill.ok.<名字>` 两端共享，还是各自确认（Windows 用 `skill.ok.*`，Mac 用 `mac.skill.ok.*`，值的算法相同）？(b) `export` 包是否附带用户的 `agents/`、`skills/`？附带问题交给 C# 定：只有 run 标记、什么也没写的运行组是否删掉标记（否则交接检查把它当作修改，§4.4.1）；`PINCC_GROUP` 并组要不要时间限制（`Store.Join` 目前只看标记是否存在，残留在 shell 里的旧组号会把写入并进几天前的组）；runs.log 的 `at` 是不带时区的本地时间、没有用 InvariantCulture，截断后的行变成 CRLF | (a) 共享：确认绑定的是文件内容，同一份 SKILL.md 两端执行的是同样的参数；能改技能文件的本机程序同样能改数据库，确认防的是误用而不是攻击。希望每台电脑各自确认时改成各自一份，不需要改 C#。(b) 附带：本机没有的文件写入，内容不同的保留本机并提示；W5 由 C# 先做 |
 
 ---
 
@@ -1520,7 +1631,8 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 | `src/Core/Markdown.cs` | `Markdown.swift` | 移植 | UTF-16；扫描器 |
 | `src/Core/Cli.cs` | `PinCCCli` | 移植 | 错误枚举；HelpCommon + 平台片段；export/import |
 | `src/Core/Fetch.cs` | `TextDecode`、`HtmlExtract`、`JsonLd`、`UrlGuard`、`FileFacts`、`ZipReader`、`WebRoute`（可移植）；`Web`、`WebKitRenderer`、`Dns`（Darwin） | 纯函数移植 + 平台实现 | HTTP 规则照搬；渲染器不同 |
-| `src/Core/Llm.cs` | `Llm.swift`（纯）；`ToolHost.swift`（Darwin） | 纯函数移植 + 平台实现 | 只读写 `mac.llm.*` |
+| `src/Core/Llm.cs` | `Llm.swift`（纯）；`ToolHost.swift`（Darwin） | 纯函数移植 + 平台实现 | 只读写 `mac.llm.*`；工具表改为执行器文件 |
+| `src/Core/Agents.cs`、`Skills.cs`（仍在改动）、`builtin/` | `Agents.swift`、`Skills.swift`、`SkillRun.swift`、`Generated/Builtin.swift`；`ToolHost.swift`（Darwin） | 移植 + 平台实现；内置文件原样共用 | 运行环境只有本机；`where` 为 windows/wsl 的步骤报错；`PINCC_EXE` 是 `Helpers/pincc` 的真实路径 |
 | `src/Core/Proc.cs` | `Proc.swift` | 平台实现，契约相同 | posix_spawn + 进程组 |
 | `src/UI/Layout.cs`、`Native.cs:7-35` | `Layout.swift`、`Geometry.swift` | 移植 | 回绕整数运算 |
 | `src/UI/Desk.cs` | `LayoutPass.swift`、`Rules.swift`（经 W4 抽出的部分）；`DeskCore.swift`（按转移表）；Win32 部分无对应 | 移植 + 按转移表编写 | 按 Id 有序 |
@@ -1530,7 +1642,7 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 | `src/UI/Flyout.cs` | `PickerModels`；选择器视图 | 规则移植 + 视图自写 | 默认用不激活的子面板；只有 P0 的 A3 实测 NSPopover 在 PinCC 不在前台时能打字、又不激活程序，才改用 NSPopover |
 | `src/UI/ManageWindow.cs` | `LibraryModel`、`SettingsSchema`；SwiftUI 设置和卡片库 | 规则移植 + 视图自写 | 设置作用域 |
 | `src/UI/Palette.cs` | `Generated/Palette.swift` | 表生成 | sRGB |
-| `src/UI/ClipData.cs` | `ClipIngest.swift`；`MacPasteboard`、`DragIn`、`DragOut` | 规则移植 + 平台实现 | ImageExts 表生成；HEIC 转码 |
+| `src/UI/ClipData.cs` | `ClipIngest.swift`；`MacPasteboard`、`DragIn`、`DragOut` | 规则移植 + 平台实现 | ImageExts 表生成；HEIC 转码；`Pictures` → `ClipIngest.pictures`，`Fresh`/`MarkUsed` → IClipboard 的 `changeCount` |
 | `src/UI/Hotkeys.cs` | `KeyBindings`、表；`MacHotkeys`（Carbon） | 表生成 + 平台实现 | `mac.hk.*` |
 | `src/UI/Toast.cs`、`AuxWindow.cs`、`Theme.xaml`、`App.cs` | `Toast`、AppDelegate | 视图自写 | App.Configure 只属于 WPF |
 | `src/UI/Native.cs`（其余） | `MacScreens`、`FullscreenMonitor` 等 | 平台实现 | — |
@@ -1557,6 +1669,8 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 | 录入快捷键 | WH_KEYBOARD_LL | 第一响应者视图 + 本地事件监听 + CopySymbolicHotKeys |
 | 全屏检测 | SHQueryUserNotificationState + 前台窗口 | 桌面空间 + CGWindowListCopyWindowInfo 窗口边界 |
 | 剪贴板 | IDataObject / CF_HTML / DIB | NSPasteboard（fileURL、public.url(-name)、org.chromium.source-url、webarchive、png/tiff/heic），accessBehavior |
+| 剪贴板变化序号（+ 贴图） | GetClipboardSequenceNumber | `NSPasteboard.changeCount` |
+| 纯文字编辑框里粘贴图片 | 自己处理 Ctrl+V / Shift+Insert（TextBox 只粘贴文字） | 重写 `readablePasteboardTypes` 和 `paste(_:)` |
 | 拖出文件 | DragDrop.DoDragDrop | NSDraggingSession + 文件 URL |
 | 打开 / 定位 | ShellExecute / explorer /select | NSWorkspace.open / activateFileViewerSelecting |
 | 提示音 | PlaySound “Notification.Reminder” | AudioServicesPlayAlertSound（Glass.aiff）/ NSSound.beep |
@@ -1638,6 +1752,10 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 | ⌃+滚动是“缩放”辅助功能的默认手势 | 已查证 | AbilityNet |
 | Liquid Glass 不用在内容层 | 已查证 | Apple HIG Materials |
 | 系统没有公开接口得知其他程序是否全屏或专注模式 | 已查证 | Developer Forums 792917、813033 |
+| `NSPasteboard.changeCount` 在剪贴板换主人（`clearContents`）时增加；只读 `changeCount` 和 `types` 是否触发 macOS 15.4 起的剪贴板隐私提示 | 部分：前半有文档，后半未查证，P0 A6 实测 | Apple NSPasteboard.changeCount、AccessBehavior 文档 |
+| 访达拷贝文件时，剪贴板里除了文件 URL 还有文件名文字和文件图标的位图；Safari、Chrome 的“拷贝图像”放了哪些类型 | 未查证（常见现象），P10 实测 | — |
+| `isRichText = false`、`importsGraphics = false` 的 NSTextView 只读文字类型，剪贴板里只有图片时“粘贴”不可用 | 未查证，P0 A2 实测 | — |
+| `CALayer.render(in:)` 是否画图层阴影 | 未查证，P0 S5 实测 | — |
 | Dropbox、OneDrive、Google Drive 在 `~/Library/CloudStorage` 下，statfs 看不出；iCloud“桌面与文稿”同步 `~/Documents`、`~/Desktop` | 部分（评审提出，P10 用单元测试确认检查方法） | 评审 1 第 27 条 |
 | WebKit 只在视图有窗口、窗口 `isVisible` 且没被遮挡时把页面当作可见；从不显示或完全在屏幕外的窗口里，页面是 hidden，定时器被节流，requestAnimationFrame 停止 | 已查证 | WebKit PageClientImplMac.mm:206-226（`isViewVisible`） |
 | WKWebView 在 macOS 27 上没有找到与屏幕外渲染有关的回归 | 未查证（“没找到证据”不等于安全） | window-vibrancy #229 等 |
@@ -1669,6 +1787,11 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 | `Desk.Start` 会写备份、显示卡片和 + 按钮、注册热键、响提示音、联网、启动子进程，第一次运行还会改 HKCU Run；`_layout` 计时器的处理函数只在 Start 里挂上 | src/UI/Desk.cs:97-130、112、184-191 |
 | src/UI 里共 14 处 `DateTime.Now`；Native.cs:46、49 的 `DateTime.UtcNow` 是屏幕缓存计时 | grep src/UI |
 | 仓库没有远端；上一版计划在提交 7e24435 | git |
+| + 的单击走 `Desk.NewFromHub`：`ClipData.Fresh`（`GetClipboardSequenceNumber` 与上次读写时记下的值不同）且 `ClipData.Pictures` 非空时建图片卡片；`ClipData.Current()` 每次读取都 `MarkUsed`，卡片上 Ctrl+C 之后也 `MarkUsed` | src/UI/Desk.cs `NewFromHub`、`Copy`；src/UI/ClipData.cs、HubWindow.cs |
+| 编辑器在剪贴板没有文字时自己处理 Ctrl+V、Shift+Insert；有文字时由 TextBox 粘贴，Pasting 事件里仍先看文件 | src/UI/CardWindow.xaml.cs `OnEditorKey`、`OnPaste`、`PasteData`；Desk.cs `IngestImages` |
+| 清单折叠只在显示层（窗口字段 `_showDone`，不写库）；快速添加期间 `Adding` 算进布局的 `Busy`；一次会话一个 Group | src/UI/CardWindow.xaml.cs `StartAdd`、`EndAdd`；MarkdownView.cs `FoldLine`；Desk.cs `AddTasks`、`DoLayout` |
+| 清单辅助函数和 CLI 清单参数已有 C# 用例 | tests/Program.cs（checklist helpers、NextTask/TitleIsTask、`--add-task`/`--check`） |
+| 图片卡片操作行的底板是 CardWindow.xaml 里的 `Bar`，悬停底色是 Theme.xaml 的 `Card.Hover` 资源 | src/UI/CardWindow.xaml、CardWindow.xaml.cs `RenderRow`、Theme.xaml |
 
 ## 附录 D：数据字典（初稿，提交后为 contracts/DATA.md）
 
@@ -1724,7 +1847,7 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 
 ### D.4 操作名
 
-`create` 新建、`edit` 编辑、`done` 完成、`delete` 删除、`restore` 恢复、`remind` 提醒、`summary` 摘要、`meta` 读取来源、`move` 移动、`resize` 调整大小、`view` 显示设置、`color` 颜色、`tile` 平铺（Cli.cs:308-313）。`import`、`sync` 推迟到 L2b 再定。
+`create` 新建、`edit` 编辑、`done` 完成、`delete` 删除、`restore` 恢复、`remind` 提醒、`summary` 摘要、`meta` 读取来源、`move` 移动、`resize` 调整大小、`view` 显示设置、`color` 颜色、`tile` 平铺（Cli.cs:308-313）、`run` 技能运行的标记记录（`card_id = 0`，§4.2.3；中文标签以 C# 的表为准）。`import`、`sync` 推迟到 L2b 再定。
 
 ### D.5 设置键
 
@@ -1740,6 +1863,7 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 | `llm.auto` | 共享 | 1 / 0 | 1 | 否 |
 | `llm.prompt` | 共享 | 文本，等于默认模板时删除 | 无 | 否 |
 | `data.features` | 共享 | 逗号分隔的特性 id | 无 | 否 |
+| `skill.ok.<名字>` | 共享（待定，§12 第 15 条） | 确认时 SKILL.md 内容的 `Card.Hash`（SHA-1 前 16 位大写十六进制；输入是 CRLF 换成 LF、去掉 BOM 之后的全文） | 无 | 否 |
 | `backup.last` | 本机 | yyyyMMdd（不变区域公历）；不导出，导入时保留本机值 | 无 | 否 |
 | `db.id` | 本机 | 首次导出时生成；不导出进 settings（写进 `bundle_meta.db_id`），导入不覆盖 | 无 | 否 |
 | `local.handoff` | 本机 | 上一次 export 或 import 成功时本机 ops 的 `sqlite_sequence`（§4.4.1 的交接检查） | 无 | 否 |
@@ -1759,11 +1883,23 @@ tools/check.sh --fuzz     # dotnet.exe 与 Swift 并排的实时差分模糊
 
 ### D.6 文件夹
 
-见 §4.1。`edge/`、`llm/`、`error.log`、`shadow.log`、`.instance` 是本机文件，不搬迁；Mac 只在数据目录里创建 `.instance`（GUI 持有 flock，内容是持有者的 bundle id），不创建其余几项。
+见 §4.1。`edge/`、`llm/`、`error.log`、`shadow.log`、`.instance` 是本机文件，不搬迁；这几项里 Mac 只创建 `.instance`（GUI 持有 flock，内容是持有者的 bundle id）。`agents/`、`skills/`（用户的执行器和技能）和 `runs.log`（运行记录）两端格式相同，Mac 也会创建；`runs.log` 不搬迁，`agents/`、`skills/` 见 §12 第 15 条。
 
 ### D.7 数据特性（data.features）
 
-初始为空。每个以后的数据格式变化在这里登记一个 id、引入它的提交、两端各自开始支持的版本。
+初始为空。每个以后的数据格式变化在这里登记一个 id、引入它的提交、两端各自开始支持的版本。清单的 CLI 参数、`run` 操作名、`skill.ok.*`、执行器和技能文件、`runs.log` 在 Mac v1 之前进入 C#，属于基线格式，不占特性 id（§4.2.10）。
+
+### D.8 执行器、技能与运行记录
+
+以 C# 实现和它的规格为准（§4.2.10），提交后与 D.1–D.7 一起进 `contracts/DATA.md`。
+
+| 项 | 键或字段 |
+|---|---|
+| 执行器 `agents/<名字>.json` | `name`、`label`、`command`、`priority`、`args`（含 `{grants}`、`{model}`）、`model`（含 `{value}`）、`requiresModel`、`listModels`、`grants`（`none`、`web`、`read`、`shell`；`{prefix}`）、`promptEscapes` |
+| 技能 `skills/<名字>/SKILL.md` 的元数据 | `name`、`label`、`description`、`when`（`src`、`kind`、`ext`、`tag`、`scope`、`on`）、`context`（`{run, where, timeout}`、`{builtin: source / note / desk}`）、`grants`（`none`、`web`、`read`、`shell:<前缀>`、`pincc`）、`runner`、`output`（`summary`、`append`、`cards`、`none`） |
+| 技能正文的占位符 | `{content}`、`{title}`、`{source}`、`{budget}`、`{what}`、`{card}`、`{note}`；取数步骤参数里的 `{src}`、`{file}`、`{dir}`、`{card}`、`{title}` |
+| `runs.log` 的一行 | `at`、`skill`、`card`、`runner`、`grants`、`ms`、`code`、`error` |
+| 运行时的环境变量 | `PINCC_CARD`、`PINCC_SRC`、`PINCC_FILE`、`PINCC_DIR`、`PINCC_SKILL`、`PINCC_EXE`、`PINCC_HOME`（设置了才有）、`PINCC_GROUP`（有 `pincc` 授权才有） |
 
 ## 附录 E：评审意见的处理
 
