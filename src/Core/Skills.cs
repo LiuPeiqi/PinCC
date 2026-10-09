@@ -319,6 +319,7 @@ public sealed class SkillRequest
     public string? Desk { get; init; }
     public int Budget { get; init; } = 300;
     public Page? Page { get; init; }
+    public RunContext? Context { get; init; }
     public bool UserAsked { get; init; } = true;
     /// <summary>A prompt that replaces the skill body (the settings' summary template).</summary>
     public string? Template { get; init; }
@@ -327,7 +328,7 @@ public sealed class SkillRequest
 }
 
 /// <summary>A finished run: the answer, and the card's source and input as they were when the run started (stale check).</summary>
-public sealed record SkillResult(string Text, string? Src, string? InputHash, string Runner, IReadOnlyList<string> Grants);
+public sealed record SkillResult(string Text, string? Src, string? InputHash, string Runner, IReadOnlyList<string> Grants, RunContext? Context = null, string? BodyHash = null);
 
 /// <summary>
 /// The skill pipeline, the same for the desktop and the CLI: context steps → prompt → model (with its grants) →
@@ -338,10 +339,38 @@ public static partial class SkillRun
     /// <summary>Runs the skill. Null only when an automatic run finds nothing it can read (the user did not ask).</summary>
     public static async Task<SkillResult?> Run(SkillRequest r, CancellationToken ct = default)
     {
+        var context = r.Context ?? RunContext.Start(r.Store, r.Skill, r.Llm, ct, r.Card?.Id);
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct, context.Token);
+        try
+        {
+            context.ThrowIfStopped();
+            var result = await RunCore(r, stop.Token, context).ConfigureAwait(false);
+            context.ThrowIfStopped();
+            if (result == null) context.Complete("skipped");
+            else if (r.Context == null) context.Complete("success");
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            try { context.ThrowIfStopped(); }
+            catch (TimeoutException e) { context.Complete("timeout", e.Message); throw; }
+            catch (OperationCanceledException) { context.Complete("cancelled"); throw; }
+            context.Complete("cancelled");
+            throw;
+        }
+        catch (Exception e) { context.Complete(e is TimeoutException ? "timeout" : "failed", e.Message); throw; }
+        finally { if (r.Context == null) context.Dispose(); }
+    }
+
+    static async Task<SkillResult?> RunCore(SkillRequest r, CancellationToken ct, RunContext context)
+    {
+        using var setup = context.Phase("skill_context");
         var skill = r.Skill;
-        var llm = skill.Runner != null && skill.Runner != r.Llm.Tool
-            ? Llm.FromSettings(r.Store, skill.Runner) ?? throw new InvalidOperationException($"技能要用执行器 {skill.Runner}：" + Llm.Problem(r.Store, skill.Runner))
-            : r.Llm;
+        var llm = context.HasRunnerSnapshot
+            ? context.SelectedLlm ?? throw new InvalidOperationException($"技能要用执行器 {skill.Runner}：" + context.RunnerProblem)
+            : skill.Runner != null && skill.Runner != r.Llm.Tool
+                ? Llm.FromSettings(r.Store, skill.Runner) ?? throw new InvalidOperationException($"技能要用执行器 {skill.Runner}：" + Llm.Problem(r.Store, skill.Runner))
+                : r.Llm;
         var c = r.Card;
         if (skill.Scope == "card" && c == null) throw new InvalidOperationException($"技能 {skill.Name} 作用于一张卡片，需要卡片编号");
         var grants = skill.Grants.Select(g => g == "pincc" ? "shell:" + ExePath(llm.IsWsl) : g).ToList();
@@ -350,18 +379,22 @@ public static partial class SkillRun
             throw new InvalidOperationException($"执行器 {llm.Tool} 不支持授权 {missing.Split(':')[0]}（技能 {skill.Name} 需要；可在 agents\\{llm.Tool}.json 的 grants 里补上）");
         var src = c?.Src;
         var hash = c?.InputHash;
+        var bodyHash = c == null ? null : Card.Hash(c.Body);
         string what = c == null ? "桌面卡片" : c.IsLink ? "网页" : c.IsFile ? "文档" : "笔记";
         string? cwd = null, file = c?.IsFile == true ? src : null;
         var parts = new List<string>();
         var (distro, wslEnv) = Llm.WslSettings(r.Store);
+        int stepNumber = 0;
         foreach (var step in skill.Context)
         {
+            context.ThrowIfStopped();
+            using var phase = context.Phase("context_step", new { index = ++stepNumber, builtin = step.Builtin });
             if (step.Builtin == "note") parts.Add(c?.Note.Trim() ?? "");
             else if (step.Builtin == "desk") parts.Add(r.Desk ?? "");
             else if (step.Builtin == "source")
             {
                 if (c == null) continue;
-                var got = await Source(c, llm, r.Page, r.UserAsked, ct).ConfigureAwait(false);
+                var got = await Source(c, llm, r.Page, r.UserAsked, ct, context).ConfigureAwait(false);
                 if (got == null) return null;
                 what = got.Value.What;
                 parts.Add(got.Value.Content);
@@ -374,22 +407,27 @@ public static partial class SkillRun
                 bool wsl = step.Where == "wsl" || step.Where == "runner" && llm.IsWsl;
                 var argv = step.Run!.Select(t => Fill(t, c, file)).ToArray();
                 var cmd = Llm.StepCommand(argv, wsl, llm.IsWsl ? llm.Distro : distro, llm.IsWsl ? llm.WslEnv : wslEnv, Env(r, c, file, wsl), null);
-                try { parts.Add(await Llm.Execute(cmd, null, TimeSpan.FromSeconds(step.Timeout), ct).ConfigureAwait(false)); }
-                catch (Exception e) when (e is InvalidOperationException or TimeoutException or IOException or System.ComponentModel.Win32Exception)
+                try { parts.Add(await Llm.Execute(cmd, null, TimeSpan.FromSeconds(step.Timeout), ct, context).ConfigureAwait(false)); }
+                catch (TimeoutException) { throw; }
+                catch (Exception e) when (e is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
                 {
                     throw new InvalidOperationException($"{argv[0]} 失败：{(e is TimeoutException ? "超时" : e.Message)}");
                 }
             }
         }
+        setup.Dispose();
+        context.ThrowIfStopped();
         var content = string.Join("\n\n", parts.Where(p => p.Length > 0));
         var prompt = Llm.Prompt(what, c?.Title ?? "桌面", src ?? "", content, r.Budget, r.Template ?? skill.Body, c?.Id ?? 0, c?.Note.Trim());
         if (skill.Grants.Contains("pincc")) prompt += PinccNote(llm.IsWsl);
         var started = When.NowMs;
+        var modelClock = System.Diagnostics.Stopwatch.StartNew();
         string? error = null;
         try
         {
-            var text = await llm.Ask(prompt, grants.Count == 0 ? ["none"] : grants, cwd, Env(r, c, file, llm.IsWsl), ct).ConfigureAwait(false);
-            return new SkillResult(text, src, hash, llm.Tool, grants);
+            var text = await llm.Ask(prompt, grants.Count == 0 ? ["none"] : grants, cwd, Env(r, c, file, llm.IsWsl), ct, context).ConfigureAwait(false);
+            context.ThrowIfStopped();
+            return new SkillResult(text, src, hash, llm.Tool, grants, r.Context, bodyHash);
         }
         catch (Exception e) { error = e.Message; throw; }
         finally
@@ -397,7 +435,7 @@ public static partial class SkillRun
             RunLog.Write(r.Store.Home, new
             {
                 at = When.FromMs(started).ToString("yyyy-MM-ddTHH:mm:sszzz", System.Globalization.CultureInfo.InvariantCulture), skill = skill.Name, card = c?.Id,
-                runner = llm.Tool, grants, ms = When.NowMs - started, code = error == null ? 0 : 1, error,
+                runner = llm.Tool, grants, ms = modelClock.ElapsedMilliseconds, code = error == null ? 0 : 1, error,
             });
         }
     }
@@ -407,7 +445,7 @@ public static partial class SkillRun
     /// itself if the runner allows (web for pages, read for documents in their folder). Null: nothing readable and
     /// nobody asked, so an automatic run quietly does nothing.
     /// </summary>
-    static async Task<(string What, string Content, string? Grant, string? Cwd, string? File)?> Source(Card c, Llm llm, Page? page, bool userAsked, CancellationToken ct)
+    static async Task<(string What, string Content, string? Grant, string? Cwd, string? File)?> Source(Card c, Llm llm, Page? page, bool userAsked, CancellationToken ct, RunContext context)
     {
         var src = c.Src;
         if (src == null) return ("笔记", c.Body, null, null, null);
@@ -415,7 +453,9 @@ public static partial class SkillRun
         {
             if (page == null)
             {
-                try { page = await Fetch.Web(src, ct, auto: !userAsked).ConfigureAwait(false); } catch { page = null; } // unreachable now: still try the web grant below
+                try { page = await Fetch.Web(src, ct, auto: !userAsked, context: context).ConfigureAwait(false); }
+                catch (OperationCanceledException) { throw; }
+                catch { ct.ThrowIfCancellationRequested(); page = null; } // unreachable now: still try the web grant below
             }
             (string What, string Content, string? Grant, string? Cwd, string? File) got;
             if (page is { Thin: false }) got = ("网页", page.Text, null, null, null);
@@ -426,7 +466,7 @@ public static partial class SkillRun
             if (!string.IsNullOrWhiteSpace(c.Note)) got.Content += "\n\n（卡片上的备注：" + c.Note.Trim() + "）";
             return got;
         }
-        var (_, text) = await Task.Run(() => Fetch.File(src), ct).ConfigureAwait(false);
+        var (_, text) = await Fetch.FileAsync(src, ct, context).ConfigureAwait(false);
         if (text.Length > 0) return ("文档", text, null, null, null);
         if (llm.Supports("read") && File.Exists(src))
             return ("文档", "请先读取当前目录中的文件「" + Path.GetFileName(src) + "」，再按要求处理。", "read", Path.GetDirectoryName(src), src);
@@ -500,8 +540,16 @@ public static partial class SkillRun
     /// source and input it had when the run started — otherwise dropped as stale), append, new cards, or nothing
     /// (the model wrote through the CLI itself). Returns the card and whether anything was written.
     /// </summary>
-    public static (Card? Card, bool Written) Apply(Store s, Group g, Skill skill, SkillResult res, long? cardId, Func<string, Group, Card>? newCard = null)
+    public static (Card? Card, bool Written) Apply(Store s, Group g, Skill skill, SkillResult res, long? cardId, Func<string, Card>? newCard = null, RunContext? context = null, Action<Card>? committedCard = null)
     {
+        context ??= res.Context;
+        context?.ThrowIfStopped();
+        using var phase = context?.Phase("apply");
+        if (cardId is long sourceId)
+        {
+            var input = s.Get(sourceId);
+            if (input == null || !input.Active || Changed(input, res)) return (input, false);
+        }
         switch (skill.Output)
         {
             case "summary" when cardId is long id:
@@ -509,7 +557,8 @@ public static partial class SkillRun
                 bool written = false;
                 var c = s.Mutate(g, id, x =>
                 {
-                    if (x.Src != res.Src || x.InputHash != res.InputHash) return; // the card changed meanwhile: this result is stale
+                    context?.ThrowIfStopped();
+                    if (!x.Active || Changed(x, res)) return; // the card changed meanwhile: this result is stale
                     x.Summary = res.Text;
                     var meta = x.Info ?? new CardMeta { Src = x.Src };
                     meta.SumHash = res.InputHash;
@@ -520,18 +569,40 @@ public static partial class SkillRun
             }
             case "append" when cardId is long id:
             {
-                var c = s.Mutate(g, id, x => x.Body = (x.Body.TrimEnd() + "\n\n" + res.Text.Trim()).Trim(), "edit");
-                return (c, c != null);
+                bool written = false;
+                var c = s.Mutate(g, id, x =>
+                {
+                    context?.ThrowIfStopped();
+                    if (!x.Active || Changed(x, res)) return;
+                    x.Body = (x.Body.TrimEnd() + "\n\n" + res.Text.Trim()).Trim();
+                    written = true;
+                }, "edit");
+                return (c, written);
             }
             case "cards":
             {
-                Card? last = null;
-                foreach (var part in Cards(res.Text)) last = newCard != null ? newCard(part, g) : s.Insert(g, new Card { Body = part });
-                return (last, last != null);
+                var cards = new List<Card>();
+                foreach (var part in Cards(res.Text))
+                {
+                    context?.ThrowIfStopped();
+                    cards.Add(newCard != null ? newCard(part) : new Card { Body = part });
+                }
+                bool CanApply()
+                {
+                    context?.ThrowIfStopped();
+                    return cardId is not long source || s.Get(source) is { Active: true } input && !Changed(input, res);
+                }
+                var written = s.InsertMany(g, cards, CanApply, context?.Token ?? default);
+                // These callbacks only display committed rows. They must never perform the inserts themselves.
+                if (committedCard != null) foreach (var row in written) committedCard(row);
+                return (written.LastOrDefault(), written.Count > 0);
             }
             default: return (null, false);
         }
     }
+
+    static bool Changed(Card card, SkillResult result) => card.Src != result.Src || card.InputHash != result.InputHash
+        || result.BodyHash != null && Card.Hash(card.Body) != result.BodyHash;
 
     /// <summary>A "cards" result: one card per part, parts separated by a line that is just "---".</summary>
     public static List<string> Cards(string text) =>

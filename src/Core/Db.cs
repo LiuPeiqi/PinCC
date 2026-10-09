@@ -73,6 +73,43 @@ public sealed class Db : IDisposable
         }
     }
 
+    /// <summary>Interrupts expensive maintenance on its dedicated connection, without interrupting GUI writes.</summary>
+    public void Script(string sql, CancellationToken ct, TimeSpan timeout) =>
+        WithBudget(() => { Script(sql); return 0; }, ct, timeout);
+
+    public T WithBudget<T>(Func<T> operation, CancellationToken ct, TimeSpan timeout)
+    {
+        lock (_gate)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (timeout <= TimeSpan.Zero) throw new TimeoutException("数据库维护超时");
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(timeout);
+            var handle = _h;
+            using var registration = deadline.Token.Register(() => sqlite3_interrupt(handle));
+            Progress progress = _ => deadline.IsCancellationRequested ? 1 : 0;
+            sqlite3_progress_handler(handle, 1000, progress, IntPtr.Zero);
+            try
+            {
+                T result;
+                try { result = operation(); }
+                catch (InvalidOperationException) when (deadline.IsCancellationRequested)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    throw new TimeoutException("数据库维护超时");
+                }
+                ct.ThrowIfCancellationRequested();
+                if (deadline.IsCancellationRequested) throw new TimeoutException("数据库维护超时");
+                return result;
+            }
+            finally
+            {
+                sqlite3_progress_handler(handle, 0, null, IntPtr.Zero);
+                GC.KeepAlive(progress);
+            }
+        }
+    }
+
     /// <summary>BEGIN IMMEDIATE … COMMIT; rolls back on exception. Not re-entrant.</summary>
     public T Tx<T>(Func<T> body)
     {
@@ -80,7 +117,7 @@ public sealed class Db : IDisposable
         {
             Script("BEGIN IMMEDIATE");
             try { var r = body(); Script("COMMIT"); return r; }
-            catch { Script("ROLLBACK"); throw; }
+            catch { if (sqlite3_get_autocommit(_h) == 0) Script("ROLLBACK"); throw; }
         }
     }
 
@@ -161,6 +198,10 @@ public sealed class Db : IDisposable
     // winsqlite3 uses __stdcall on x86; the attribute is ignored on x64/arm64.
     [DllImport(Lib, CallingConvention = CallingConvention.StdCall)] static extern int sqlite3_open_v2(byte[] pathUtf8, out IntPtr db, int flags, IntPtr vfs);
     [DllImport(Lib, CallingConvention = CallingConvention.StdCall)] static extern int sqlite3_close_v2(IntPtr db);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int Progress(IntPtr context);
+    [DllImport(Lib, CallingConvention = CallingConvention.StdCall)] static extern void sqlite3_progress_handler(IntPtr db, int instructions, Progress? callback, IntPtr context);
+    [DllImport(Lib, CallingConvention = CallingConvention.StdCall)] static extern void sqlite3_interrupt(IntPtr db);
+    [DllImport(Lib, CallingConvention = CallingConvention.StdCall)] static extern int sqlite3_get_autocommit(IntPtr db);
     [DllImport(Lib, CallingConvention = CallingConvention.StdCall)] static extern int sqlite3_busy_timeout(IntPtr db, int ms);
     [DllImport(Lib, CallingConvention = CallingConvention.StdCall)] static extern int sqlite3_exec(IntPtr db, byte[] sqlUtf8, IntPtr cb, IntPtr arg, out IntPtr err);
     [DllImport(Lib, CallingConvention = CallingConvention.StdCall)] static extern void sqlite3_free(IntPtr p);

@@ -2,6 +2,8 @@ using System.Globalization;
 using PinCC.Core;
 using PinCC.UI;
 
+if (AgentLogTests.TryRunChild(args, out var childExitCode)) return childExitCode;
+
 int failed = 0, passed = 0;
 void Eq<T>(T actual, T expected, string what)
 {
@@ -442,7 +444,10 @@ try { Directory.Delete(home1, true); } catch { }
 // ---------------- CLI ----------------
 var cliHome = Path.Combine(Path.GetTempPath(), "pincc-test-" + Guid.NewGuid().ToString("N")[..8]);
 Directory.CreateDirectory(cliHome);
+var previousCliHome = Environment.GetEnvironmentVariable("PINCC_HOME");
 Environment.SetEnvironmentVariable("PINCC_HOME", cliHome);
+try
+{
 (int Code, string Out) Cmd(string stdin, params string[] a)
 {
     var w = new StringWriter();
@@ -523,8 +528,12 @@ Eq(Cmd("a", "set", lid, "--summary", "-", "--add-task", "-").Code, 1, "stdin rea
 Eq(Cmd("", "set", lid, "--add-task", " ").Code, 1, "blank --add-task");
 Eq(Cmd("", "add", "x", "--check", "1").Code, 1, "--check is for set");
 using (var s = new Store()) Eq(s.Get(long.Parse(lid))!.Progress, (1, 4), "failed commands wrote nothing");
-Environment.SetEnvironmentVariable("PINCC_HOME", null);
-try { Directory.Delete(cliHome, true); } catch { }
+}
+finally
+{
+    Environment.SetEnvironmentVariable("PINCC_HOME", previousCliHome);
+    try { Directory.Delete(cliHome, true); } catch { }
+}
 
 // ---------------- Fetch ----------------
 Eq(Fetch.SafeToAuto("https://github.com/dotnet/wpf"), true, "public url auto ok");
@@ -549,6 +558,8 @@ Eq(Fetch.Text(System.Text.Encoding.GetEncoding(936).GetBytes("中文GBK")), "中
 
 failed += FetchTests.Run();
 failed += SkillTests.Run();
+failed += AgentLogTests.Run();
+failed += StoreSafetyTests.Run();
 
-Console.WriteLine($"{passed} passed, {failed} failed");
+Console.WriteLine($"{passed + FetchTests.Passed + SkillTests.Passed + AgentLogTests.Passed + StoreSafetyTests.Passed} passed, {failed} failed");
 return failed == 0 ? 0 : 1;

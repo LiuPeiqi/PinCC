@@ -37,7 +37,8 @@ public sealed partial class Llm
     public static IEnumerable<string> Tools => Runners.All.Select(p => p.Name);
 
     /// <summary>The runner profile (null for a custom command line).</summary>
-    public RunnerProfile? Profile => Custom != null ? null : Runners.Find(Tool);
+    readonly RunnerProfile? _profile;
+    public RunnerProfile? Profile => _profile;
     RunnerProfile Row => Profile ?? throw new InvalidOperationException("未知的执行器：" + Tool);
 
     public string Tool { get; }
@@ -50,23 +51,32 @@ public sealed partial class Llm
     /// <summary>WSL only: PATH / proxy variables of the user's login shell, captured by <see cref="Scan"/>.</summary>
     public IReadOnlyDictionary<string, string> WslEnv { get; }
 
-    public Llm(string tool, string where, string? model, string? custom = null, IReadOnlyDictionary<string, string>? wslEnv = null, string? distro = null)
+    public Llm(string tool, string where, string? model, string? custom = null, IReadOnlyDictionary<string, string>? wslEnv = null, string? distro = null, RunnerProfile? profile = null)
     {
         Tool = tool;
         Where = where;
         Model = model?.Trim() is { } m && ModelRx().IsMatch(m) ? m : null; // anything else would be a command-line hazard: ignored
         Custom = string.IsNullOrWhiteSpace(custom) ? null : custom.Trim();
+        _profile = Custom != null ? null : Snapshot(profile ?? Runners.Find(tool));
         Distro = ValidDistro(distro);
         WslEnv = FilterEnv(wslEnv);
     }
 
+    static RunnerProfile? Snapshot(RunnerProfile? p) => p == null ? null : new RunnerProfile
+    {
+        Name = p.Name, Label = p.Label, Command = p.Command, Priority = p.Priority, Origin = p.Origin,
+        Args = p.Args.ToArray(), Model = p.Model?.ToArray(), RequiresModel = p.RequiresModel, ListModels = p.ListModels?.ToArray(),
+        Grants = p.Grants?.ToDictionary(kv => kv.Key, kv => kv.Value.ToArray()),
+        PromptEscapes = p.PromptEscapes == null ? null : new Dictionary<string, string>(p.PromptEscapes),
+    };
+
     static Dictionary<string, string> FilterEnv(IReadOnlyDictionary<string, string>? env) => (env ?? new Dictionary<string, string>())
-        .Where(kv => EnvNames.Contains(kv.Key) && kv.Value.Length is > 0 and < 8000 && !kv.Value.Any(char.IsControl))
+        .Where(kv => EnvNames.Contains(kv.Key) && kv.Value is { Length: > 0 and < 8000 } && !kv.Value.Any(char.IsControl))
         .ToDictionary(kv => kv.Key, kv => kv.Value);
 
     /// <summary>The PINCC_* variables of a run, checked: a name that is not PINCC_*, or a value with control characters, is dropped.</summary>
     static Dictionary<string, string> RunEnv(IReadOnlyDictionary<string, string>? env) => (env ?? new Dictionary<string, string>())
-        .Where(kv => RunEnvRx().IsMatch(kv.Key) && kv.Value.Length < 8000 && !kv.Value.Any(char.IsControl))
+        .Where(kv => RunEnvRx().IsMatch(kv.Key) && kv.Value is { Length: < 8000 } && !kv.Value.Any(char.IsControl))
         .ToDictionary(kv => kv.Key, kv => kv.Value);
 
     /// <summary>A WSL distribution name, or null when empty or not a plain name (it becomes a wsl.exe argument).</summary>
@@ -102,10 +112,10 @@ public sealed partial class Llm
         if (tool == "custom")
             return custom is { Length: > 0 } ? (new Llm("custom", wsl ? "wsl" : "windows", null, custom, env, distro), null) : (null, "请填写自定义命令");
         if (Runners.Find(tool) is not { } profile) return (null, "未知的工具：" + tool);
-        if (wsl) return (new Llm(tool, "wsl", model, null, env, distro), null);
+        if (wsl) return (new Llm(tool, "wsl", model, null, env, distro, profile), null);
         // Windows: an explicit path (older settings stored the one detection found), else the current PATH.
         var path = where != "windows" && File.Exists(where) && wanted == null ? where : Which(profile.Program);
-        return path == null ? (null, $"Windows 中没有找到 {profile.Program}（PATH、npm、.local\\bin）") : (new Llm(tool, path, model), null);
+        return path == null ? (null, $"Windows 中没有找到 {profile.Program}（PATH、npm、.local\\bin）") : (new Llm(tool, path, model, profile: profile), null);
     }
 
     /// <summary>The WSL side of the settings (distribution, login-shell PATH/proxies): context steps may run there whatever the runner.</summary>
@@ -252,21 +262,36 @@ public sealed partial class Llm
     public Task<string> Ask(string prompt, LlmMode mode = LlmMode.Text, string? cwd = null, CancellationToken ct = default) => Ask(prompt, [Grant(mode)], cwd, null, ct);
 
     /// <summary>Runs the model with <paramref name="grants"/> and the run's PINCC_* variables; returns its answer.</summary>
-    public async Task<string> Ask(string prompt, IReadOnlyList<string> grants, string? cwd, IReadOnlyDictionary<string, string>? runEnv, CancellationToken ct = default)
+    public async Task<string> Ask(string prompt, IReadOnlyList<string> grants, string? cwd, IReadOnlyDictionary<string, string>? runEnv, CancellationToken ct = default, RunContext? context = null)
     {
         if (Profile is { RequiresModel: true } p && Model == null)
             throw new InvalidOperationException($"{p.Display} 需要模型：在“模型”里填写" + (p.ListModels is { Length: > 0 } list ? $"（{p.Program} {string.Join(" ", list)} 可查看已下载的模型）" : ""));
         foreach (var (from, to) in Profile?.PromptEscapes ?? []) if (from.Length > 0) prompt = prompt.Replace(from, to);
         if (cwd != null && !cwd.StartsWith('/') && !Directory.Exists(cwd)) throw new InvalidOperationException("文件夹不存在：" + cwd);
         var cmd = BuildCommand(grants, cwd, runEnv);
-        await Gate.WaitAsync(ct).ConfigureAwait(false);
-        try { return StripFence(await Execute(cmd, prompt, TimeSpan.FromSeconds(IsWsl ? 180 : 150), ct).ConfigureAwait(false)); }
+        context?.ThrowIfStopped();
+        using var queueStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        queueStop.CancelAfter(TimeSpan.FromSeconds(60));
+        try
+        {
+            using (context?.Phase("model_queue"))
+                await Gate.WaitAsync(queueStop.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new TimeoutException("等待模型空位超过 60 秒"); }
+        try
+        {
+            context?.ThrowIfStopped();
+            using var phase = context?.Phase("model");
+            return StripFence(await Execute(cmd, prompt, TimeSpan.FromSeconds(IsWsl ? 180 : 150), ct, context).ConfigureAwait(false));
+        }
         finally { Gate.Release(); }
     }
 
     /// <summary>Starts <paramref name="cmd"/> with <paramref name="stdin"/>; its output, or an exception carrying the tool's own message.</summary>
-    public static async Task<string> Execute(Command cmd, string? stdin, TimeSpan timeout, CancellationToken ct)
+    public static async Task<string> Execute(Command cmd, string? stdin, TimeSpan timeout, CancellationToken ct, RunContext? context = null)
     {
+        context?.ThrowIfStopped();
+        if (context != null && context.Remaining < timeout) timeout = context.Remaining;
         if (cmd.Cwd == WorkDirPath) Directory.CreateDirectory(WorkDirPath);
         var env = new Dictionary<string, string>
         {
@@ -275,7 +300,30 @@ public sealed partial class Llm
             ["WSLENV"] = (Environment.GetEnvironmentVariable("WSLENV") is { Length: > 0 } w ? w + ":" : "") + "NO_COLOR/u:TERM/u",
         };
         foreach (var (k, v) in cmd.Env ?? new Dictionary<string, string>()) env[k] = v;
-        var r = await Proc.Run(cmd.File, cmd.Args, stdin, timeout, ct, env, cmd.Cwd, cmd.Raw).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        var argv = cmd.Args.ToList();
+        string? wslRun = null, distro = null;
+        int script = argv.IndexOf(WslScript);
+        if (script >= 0 && string.Equals(cmd.File, WslExe, StringComparison.OrdinalIgnoreCase))
+        {
+            wslRun = Guid.NewGuid().ToString("N");
+            int distribution = argv.IndexOf("-d");
+            if (distribution >= 0) distro = argv[distribution + 1];
+            argv[script] = TimedWslScript;
+            // Only generated identifiers and a numeric budget are passed to the fixed shell script.
+            argv.InsertRange(argv.IndexOf("-e") + 1, ["/usr/bin/env", "PINCC_RUN=" + wslRun,
+                "PINCC_TIMEOUT=" + Math.Max(0.01, timeout.TotalSeconds - Math.Min(5, timeout.TotalSeconds / 10)).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "s",
+                "PINCC_KILL=" + Math.Min(5, timeout.TotalSeconds / 10).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "s"]);
+        }
+        Proc.Result r;
+        try { r = await Proc.Run(cmd.File, argv, stdin, timeout, ct, env, cmd.Cwd, cmd.Raw).ConfigureAwait(false); }
+        finally
+        {
+            // Even a normally exiting tool can leave grandchildren in its Linux process group.
+            if (wslRun != null) await CleanupWsl(distro, wslRun).ConfigureAwait(false);
+        }
+        ct.ThrowIfCancellationRequested();
+        if (wslRun != null && r.Code is 124 or 137) throw new TimeoutException("WSL 程序超过时间预算");
         var output = AnsiRx().Replace(r.Out, "").Trim();
         if (r.Code != 0 || output.Length == 0)
         {
@@ -283,6 +331,19 @@ public sealed partial class Llm
             throw new InvalidOperationException(why.Length > 0 ? Tail(why) : $"退出码 {r.Code}，没有输出");
         }
         return output;
+    }
+
+    const string TimedWslScript = UsePath + "marker=/tmp/pincc-$PINCC_RUN.pid; timeout -k \"$PINCC_KILL\" \"$PINCC_TIMEOUT\" \"$0\" \"$@\" <&0 & child=$!; echo \"$child\" > \"$marker\"; wait \"$child\"; status=$?; kill -0 -- -$child 2>/dev/null || rm -f \"$marker\"; exit \"$status\"";
+    const string CleanupWslScript = "marker=/tmp/pincc-$1.pid; [ -f \"$marker\" ] || exit 0; pid=$(cat \"$marker\"); case \"$pid\" in ''|*[!0-9]*) exit 0;; esac; owned=; for member in $(pgrep -g \"$pid\"); do [ -r /proc/$member/environ ] || continue; tr '\\0' '\\n' < /proc/$member/environ | grep -qx \"PINCC_RUN=$1\" && owned=1; done; [ \"$owned\" = 1 ] || exit 0; kill -TERM -- -$pid 2>/dev/null; sleep 0.2; kill -KILL -- -$pid 2>/dev/null; rm -f \"$marker\"";
+    static async Task CleanupWsl(string? distro, string run)
+    {
+        try
+        {
+            List<string> args = distro == null ? [] : ["-d", distro];
+            args.AddRange(["-e", "bash", "-c", CleanupWslScript, "pincc-cleanup", run]);
+            await Proc.Run(WslExe, args, null, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        }
+        catch { } // Best effort; the independent Linux timeout remains the backstop.
     }
 
     public Task<string> Test(CancellationToken ct = default) => Ask("Reply with exactly: OK", LlmMode.Text, null, ct);
@@ -306,11 +367,11 @@ public sealed partial class Llm
         foreach (var p in Runners.All)
         {
             if (Which(p.Program) is not { } path) continue;
-            if (!p.RequiresModel) return new Llm(p.Name, path, null);
+            if (!p.RequiresModel) return new Llm(p.Name, path, null, profile: p);
             if (p.ListModels is not { Length: > 0 } list || path.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)) continue;
             var r = await Proc.Run(path, list, null, TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
             var model = r.Code == 0 ? r.Out.Split('\n').Skip(1).Select(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()).FirstOrDefault(m => m != null) : null;
-            if (model != null && ModelRx().IsMatch(model)) return new Llm(p.Name, path, model);
+            if (model != null && ModelRx().IsMatch(model)) return new Llm(p.Name, path, model, profile: p);
         }
         var wsl = await Scan(wsl: true, null, ct).ConfigureAwait(false);
         return wsl.Tools.FirstOrDefault(t => Runners.Find(t) is { RequiresModel: false }) is { } found ? new Llm(found, "wsl", null, null, wsl.Env) : null;

@@ -4,6 +4,7 @@ using PinCC.Core;
 /// <summary>Runner profiles, skills, the skill pipeline and its CLI. Starts no model: the runner is a custom `more`. Returns the number of failures.</summary>
 public static class SkillTests
 {
+    public static int Passed { get; private set; }
     public static int Run()
     {
         int failed = 0, passed = 0;
@@ -22,6 +23,10 @@ public static class SkillTests
 
         var home = Path.Combine(Path.GetTempPath(), "pincc-skills-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(home);
+        var envBefore = Environment.GetEnvironmentVariable("PINCC_HOME");
+        var groupBefore = Environment.GetEnvironmentVariable("PINCC_GROUP");
+        try
+        {
         Runners.Reload(home);
         Skills.Reload(home);
 
@@ -140,7 +145,6 @@ public static class SkillTests
         Directory.Delete(Path.Combine(skills, "summary"), true);
 
         // ---------------- the pipeline end to end: a context step, the note, a model that echoes (more) ----------------
-        var envBefore = Environment.GetEnvironmentVariable("PINCC_HOME");
         Environment.SetEnvironmentVariable("PINCC_HOME", home);
         long cardId;
         using (var s = new Store(home))
@@ -184,6 +188,125 @@ public static class SkillTests
             var stale = new SkillResult("S", card.Src, "old-hash", "custom", []);
             Eq(SkillRun.Apply(s, s.Begin(), sumSkill, stale, card.Id).Written, false, "summary for a changed input is dropped");
             True(SkillRun.Cards("a\n---\nb\n\n---\n\n").SequenceEqual(["a", "b"]), "cards output splits on ---");
+
+            var cardsSkill = Skill.Parse("---\nname: cards-test\ndescription: d\noutput: cards\n---\nx", "cards-test", "user");
+            var beforeBody = s.Get(card.Id)!.Body;
+            Eq(SkillRun.Apply(s, s.Begin(), skill, stale, card.Id).Written, false, "stale append result is dropped");
+            var beforeCards = s.Active().Count;
+            Eq(SkillRun.Apply(s, s.Begin(), cardsSkill, stale, card.Id).Written, false, "stale card-producing result is dropped");
+            Eq(s.Active().Count, beforeCards, "stale cards result creates no card");
+            Eq(s.Get(card.Id)!.Body, beforeBody, "stale append preserves the input");
+
+            using (var cancelApply = new CancellationTokenSource())
+            using (var cancelledRun = RunContext.Start(s, TimeSpan.FromSeconds(10), cancelApply.Token))
+            {
+                cancelApply.Cancel();
+                var fresh = new SkillResult("MUST-NOT-WRITE", card.Src, card.InputHash, "custom", [], cancelledRun, Card.Hash(card.Body));
+                foreach (var outputSkill in new[] { sumSkill, skill, cardsSkill })
+                    True(ThrowsExact<OperationCanceledException>(() => SkillRun.Apply(s, s.Begin(), outputSkill, fresh, card.Id)),
+                        "cancelled result cannot apply output " + outputSkill.Output);
+                Eq(s.Active().Count, beforeCards, "cancelled card output creates no card");
+                Eq(s.Get(card.Id)!.Body, beforeBody, "cancelled append creates no edit");
+            }
+
+            using (var atomicStop = new CancellationTokenSource())
+            using (var atomicRun = RunContext.Start(s, TimeSpan.FromSeconds(10), atomicStop.Token))
+            {
+                var fresh = new SkillResult("first\n---\nsecond", card.Src, card.InputHash, "custom", [], atomicRun, Card.Hash(card.Body));
+                int prepared = 0, displayed = 0;
+                True(ThrowsExact<OperationCanceledException>(() => SkillRun.Apply(s, s.Begin(), cardsSkill, fresh, card.Id,
+                    body => { if (++prepared == 2) atomicStop.Cancel(); return new Card { Body = body }; }, atomicRun, _ => displayed++)),
+                    "cancellation between card preparation and commit stops the whole output");
+                Eq(s.Active().Count, beforeCards, "cancelled multi-card output has no partial inserts");
+                Eq(displayed, 0, "cancelled multi-card output displays no uncommitted row");
+            }
+            var validCards = new SkillResult("first\n---\nsecond", card.Src, card.InputHash, "custom", [], BodyHash: Card.Hash(card.Body));
+            int preparedCards = 0;
+            var staleAfterPreparation = SkillRun.Apply(s, s.Begin(), cardsSkill, validCards, card.Id, body =>
+            {
+                if (++preparedCards == 2) s.Mutate(s.Begin(), card.Id, row => row.Body += "\nchanged during preparation", "edit");
+                return new Card { Body = body };
+            });
+            True(!staleAfterPreparation.Written && s.Active().Count == beforeCards, "source is rechecked inside the card output transaction");
+            s.Mutate(s.Begin(), card.Id, row => row.Body = beforeBody, "edit");
+
+            var longStep = Skill.Parse("---\nname: deadline-test\ndescription: d\ncontext: [{\"run\": [\"cmd.exe\", \"/d\", \"/c\", \"ping -n 30 127.0.0.1 >nul\"], \"where\": \"windows\", \"timeout\": 600}]\n---\nx", "deadline-test", "user");
+            using (var compatible = RunContext.Start(s, longStep, Llm.FromSettings(s)!))
+                True(compatible.Budget > TimeSpan.FromSeconds(600), "default overall budget preserves a legitimate 600 second context step");
+            s.SetSetting("llm.run_timeout", "1");
+            var deadlineClock = System.Diagnostics.Stopwatch.StartNew();
+            var summaryLines = File.ReadAllLines(Path.Combine(home, "runs.log")).Length;
+            True(ThrowsExact<TimeoutException>(() => SkillRun.Run(new SkillRequest { Skill = longStep, Llm = Llm.FromSettings(s)!, Store = s, Card = card }).GetAwaiter().GetResult()),
+                "whole-task deadline covers context collection before model launch");
+            True(deadlineClock.Elapsed < TimeSpan.FromSeconds(6), "whole-task context timeout completes within cleanup allowance");
+            Eq(File.ReadAllLines(Path.Combine(home, "runs.log")).Length, summaryLines, "context failure preserves legacy model-summary log semantics");
+            s.SetSetting("llm.run_timeout", null);
+
+            var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            listener.Start();
+            int sourcePort = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+            using (var sourceStop = new CancellationTokenSource())
+            {
+                var stalled = Task.Run(async () =>
+                {
+                    using var client = await listener.AcceptTcpClientAsync(sourceStop.Token);
+                    await Task.Delay(10000, sourceStop.Token); // deliberately never return headers
+                });
+                var marker = Path.Combine(home, "source-cancel-model.txt");
+                var model = new Llm("custom", "windows", null, $"echo MODEL>\"{marker}\" & more");
+                var link = s.Insert(s.Begin(), new Card { Body = $"http://127.0.0.1:{sourcePort}/stalled" });
+                var sourceSkill = Skill.Parse("---\nname: source-test\ndescription: d\ncontext: [{\"builtin\": \"source\"}]\n---\nx", "source-test", "user");
+                using var requestStop = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+                using var sourceRun = RunContext.Start(s, sourceSkill, model, requestStop.Token, link.Id);
+                try
+                {
+                    True(ThrowsExact<OperationCanceledException>(() => SkillRun.Run(new SkillRequest { Skill = sourceSkill, Llm = model, Store = s, Card = link, Context = sourceRun }, requestStop.Token).GetAwaiter().GetResult()),
+                        "cancellation while reading source is propagated");
+                    True(!File.Exists(marker), "cancelled source never falls back to launching the model");
+                    var events = File.ReadLines(Path.Combine(home, "diagnostics.log")).Select(line => System.Text.Json.JsonDocument.Parse(line)).ToList();
+                    try
+                    {
+                        True(events.Any(e => e.RootElement.TryGetProperty("run_id", out var id) && id.GetString() == sourceRun.Id
+                            && e.RootElement.TryGetProperty("outcome", out var outcome) && outcome.GetString() == "cancelled"),
+                            "source cancellation has a correlated terminal diagnostic");
+                    }
+                    finally { foreach (var entry in events) entry.Dispose(); }
+                }
+                finally
+                {
+                    sourceStop.Cancel(); listener.Stop();
+                    try { stalled.GetAwaiter().GetResult(); } catch (OperationCanceledException) { } catch (System.Net.Sockets.SocketException) { }
+                }
+            }
+
+            // Occupy both model slots, then cancel a queued request; it must not start a third process.
+            using (var occupiedStop = new CancellationTokenSource())
+            {
+                var marker1 = Path.Combine(home, "queue1.txt");
+                var marker2 = Path.Combine(home, "queue2.txt");
+                var queuedMarker = Path.Combine(home, "queue3.txt");
+                var holder1 = new Llm("custom", "windows", null, $"echo RUN>\"{marker1}\" & ping -n 30 127.0.0.1 >nul");
+                var holder2 = new Llm("custom", "windows", null, $"echo RUN>\"{marker2}\" & ping -n 30 127.0.0.1 >nul");
+                var first = holder1.Ask("", ct: occupiedStop.Token);
+                var second = holder2.Ask("", ct: occupiedStop.Token);
+                try
+                {
+                    var wait = System.Diagnostics.Stopwatch.StartNew();
+                    while ((!File.Exists(marker1) || !File.Exists(marker2)) && wait.Elapsed < TimeSpan.FromSeconds(5)) Thread.Sleep(20);
+                    True(File.Exists(marker1) && File.Exists(marker2), "two model slots are occupied before queue cancellation check");
+                    using var queuedStop = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+                    var queued = new Llm("custom", "windows", null, $"echo BAD>\"{queuedMarker}\" & echo OK");
+                    True(ThrowsExact<OperationCanceledException>(() => queued.Ask("", ct: queuedStop.Token).GetAwaiter().GetResult()), "queued model observes caller cancellation");
+                    True(!File.Exists(queuedMarker), "cancelled queue request starts no process");
+                }
+                finally
+                {
+                    occupiedStop.Cancel();
+                    foreach (var task in new[] { first, second })
+                        try { task.GetAwaiter().GetResult(); } catch (OperationCanceledException) { }
+                }
+                Eq(new Llm("custom", "windows", null, "echo OK").Ask("").GetAwaiter().GetResult(), "OK", "model slots are released after cancellation");
+            }
 
             // reserved groups: the marker, joining from the CLI, restore
             var run = s.Begin();
@@ -241,13 +364,25 @@ public static class SkillTests
             var ids = s.Restore(reserved);
             True(!ids.Contains(0) && s.Get(cardId)!.Body.StartsWith("hello note") && s.Active().All(c => c.Body != "a card the model made"), "restore undoes the whole run");
         }
-        Environment.SetEnvironmentVariable("PINCC_HOME", envBefore);
-        Runners.Reload(Store.DefaultHome);
-        Skills.Reload(Store.DefaultHome);
-        try { Directory.Delete(home, true); } catch { }
-
+        Passed = passed;
         Console.WriteLine($"SkillTests: {passed} passed, {failed} failed");
         return failed;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PINCC_HOME", envBefore);
+            Environment.SetEnvironmentVariable("PINCC_GROUP", groupBefore);
+            Runners.Reload(Path.Combine(home, "empty"));
+            Skills.Reload(Path.Combine(home, "empty"));
+            try { Directory.Delete(home, true); } catch { }
+        }
+    }
+
+    static bool ThrowsExact<T>(Action action) where T : Exception
+    {
+        try { action(); return false; }
+        catch (T) { return true; }
+        catch { return false; }
     }
 
     static string? FindUp(string relative)

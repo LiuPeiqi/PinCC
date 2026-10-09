@@ -1,6 +1,15 @@
+# Build intermediates
 bin/
 obj/
-dist/
-.probe/
 *.user
 .vs/
+
+# Probe / live-desktop scratch (never ship)
+.probe/
+
+# Crash dumps and one-off diagnostics
+docs/diagnostics/
+*.dmp
+
+# Publish promotion scratch inside dist/
+dist/**/PinCC.next-*.exe

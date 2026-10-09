@@ -104,6 +104,7 @@ public sealed class MessageWindow : IDisposable
 {
     readonly HwndSource _src;
     public event Action<int, IntPtr, IntPtr>? Message;
+    public event Action<Exception>? Fault;
     public IntPtr Handle => _src.Handle;
 
     public MessageWindow()
@@ -114,7 +115,16 @@ public sealed class MessageWindow : IDisposable
             ExtendedWindowStyle = Native.WS_EX_TOOLWINDOW,
             Width = 0, Height = 0,
         });
-        _src.AddHook((IntPtr h, int msg, IntPtr w, IntPtr l, ref bool handled) => { Message?.Invoke(msg, w, l); return IntPtr.Zero; });
+        _src.AddHook((IntPtr h, int msg, IntPtr w, IntPtr l, ref bool handled) =>
+        {
+            try { Message?.Invoke(msg, w, l); }
+            catch (Exception error)
+            {
+                // Managed exceptions must not unwind across a native message callback.
+                try { Fault?.Invoke(error); } catch { /* never unwind across a native callback */ }
+            }
+            return IntPtr.Zero;
+        });
     }
 
     public void Dispose() => _src.Dispose();
@@ -194,6 +204,16 @@ public static class Native
     [DllImport("winmm", CharSet = CharSet.Unicode)] static extern bool PlaySound(string sound, IntPtr module, uint flags);
     [DllImport("shell32")] static extern int SHQueryUserNotificationState(out int state);
 
+    public static HwndSourceHook ProtectHook(HwndSourceHook callback, Action<Exception> report) =>
+        (IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) =>
+        {
+            try { return callback(hwnd, message, w, l, ref handled); }
+            catch (Exception error)
+            {
+                try { report(error); } catch { }
+                return IntPtr.Zero;
+            }
+        };
     public static Px WindowRect(IntPtr hwnd)
     {
         GetWindowRect(hwnd, out var r);

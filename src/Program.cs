@@ -4,34 +4,38 @@ using PinCC.Core;
 
 namespace PinCC;
 
-/// <summary>One exe, two faces: `PinCC.exe &lt;command&gt;` is the text API, `PinCC.exe` is the desktop app.</summary>
+/// <summary>One exe, two faces: the text API and the desktop app.</summary>
 public static class Program
 {
-    const string InstanceName = @"Local\PinCC.Instance";
-    public const string ShowEventName = @"Local\PinCC.Show";
+    public static string? SmokeScenario => Environment.GetEnvironmentVariable("PINCC_UI_SMOKE") is { Length: > 0 } value ? value : null;
+    public static bool IsDiagnostic => SmokeScenario != null
+        || Environment.GetEnvironmentVariable("PINCC_UI_SNAPSHOT") is { Length: > 0 }
+        || Environment.GetEnvironmentVariable("PINCC_SNAPSHOT") is { Length: > 0 };
+    static string IdentitySuffix => !IsDiagnostic ? "" : "." + Convert.ToHexString(
+        System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(Store.DefaultHome).ToUpperInvariant())))[..16];
+    static string InstanceName => @"Local\PinCC.Instance" + IdentitySuffix;
+    public static string ShowEventName => @"Local\PinCC.Show" + IdentitySuffix;
 
     [STAThread]
     public static int Main(string[] args)
     {
-        // Any argument is the text API (unknown verbs print usage and never start the GUI) — except the autostart flag.
         if (args.Length > 0 && args[0] != "--startup") return RunCli(args);
-
-        if (Environment.GetEnvironmentVariable("PINCC_UI_SNAPSHOT") is { Length: > 0 })
-        {
-            new UI.App().Run(); // render-only diagnostic: shows nothing, so it may run beside the real instance
-            return 0;
-        }
+        if (SmokeScenario != null && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PINCC_HOME")))
+            return 2; // A fault-injection run must have an explicitly isolated data home.
         using var mutex = new Mutex(true, InstanceName, out bool first);
         if (!first)
         {
-            // Already running: ask it to bring every card back.
             try { using var e = EventWaitHandle.OpenExisting(ShowEventName); e.Set(); } catch { }
             return 0;
         }
-        var app = new UI.App();
-        app.Run(); // e.Args carries --startup
-        GC.KeepAlive(mutex);
-        return 0;
+        try
+        {
+            var app = new UI.App();
+            var result = app.Run();
+            GC.KeepAlive(mutex);
+            return result;
+        }
+        catch (Exception error) { UI.App.Log(error, "main"); return 1; }
     }
 
     static int RunCli(string[] args)
@@ -55,14 +59,25 @@ public static class Program
             Console.OpenStandardInput().CopyTo(ms);
             return Fetch.Text(ms.ToArray());
         }
-        try { return Cli.Run(args, o, ReadStdin); }
+        using var cancellation = new CancellationTokenSource();
+        ConsoleCancelEventHandler cancel = (_, e) => { e.Cancel = true; cancellation.Cancel(); };
+        var attached = false;
+        if (args[0] == "run")
+        {
+            try { Console.CancelKeyPress += cancel; attached = true; } catch { }
+        }
+        try { return Cli.Run(args, o, ReadStdin, cancellation.Token); }
         catch (Exception e)
         {
             // Last resort (e.g. stdin unreadable): a message and exit 1, never an unhandled-exception dialog.
             try { o.WriteLine("错误：" + e.Message); } catch { }
             return Cli.UsageError;
         }
-        finally { try { o.Flush(); } catch { } }
+        finally
+        {
+            if (attached) { try { Console.CancelKeyPress -= cancel; } catch { } }
+            try { o.Flush(); } catch { }
+        }
     }
 
     [DllImport("kernel32")] static extern IntPtr GetStdHandle(int n);

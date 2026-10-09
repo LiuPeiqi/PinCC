@@ -39,6 +39,7 @@ public partial class CardWindow : Window
     TextBox? _adder;
     Group? _addSession;
     TextBlock? _addChip; // the progress chip: a "+" joins it on hover
+    bool _closing;
     bool _showDone; // folded checked tasks shown for now (this window only, never stored)
     double _sizeMoveScale = 1;
 
@@ -71,12 +72,13 @@ public partial class CardWindow : Window
         _desk = desk;
         Card = card;
         InitializeComponent();
+        Closing += (_, _) => { _closing = true; StopCallbacks(); };
         SourceInitialized += (_, _) =>
         {
             _hwnd = new WindowInteropHelper(this).Handle;
             Native.AddExStyle(_hwnd, Native.WS_EX_TOOLWINDOW); // out of Alt+Tab (ShowInTaskbar=false alone does not)
             var src = HwndSource.FromHwnd(_hwnd);
-            src.AddHook(WndProc);
+            src.AddHook(Native.ProtectHook(WndProc, _desk.ReportNativeFailure));
             src.AddHook(Native.NoActivateOnDpiChange());
         };
         _autosave.Tick += (_, _) => { _autosave.Stop(); Autosave(); };
@@ -98,9 +100,10 @@ public partial class CardWindow : Window
             if (PointerOnCard()) _leaveTimer.Start();
             else PointerLeft();
         };
-        Activated += (_, _) => RenderFrame();
+        Activated += (_, _) => { if (!_desk.Stopping) RenderFrame(); };
         Deactivated += (_, _) =>
         {
+            if (_desk.Stopping || _closing) return;
             RenderFrame();
             EndAdd();
             if (_keepEditing) { _keepEditing = false; return; } // focus went to our own flyout
@@ -214,6 +217,7 @@ public partial class CardWindow : Window
 
     public void Render()
     {
+        if (_desk.Stopping || _closing) return;
         var sw = Palette.Get(_desk.ColorOf(Card));
         Surface.Background = Palette.Brush(sw.Back);
         Foreground = Palette.Brush(sw.Ink);
@@ -234,6 +238,7 @@ public partial class CardWindow : Window
     /// <summary>Stroke = state: red when overdue, accent when this card has keyboard focus, a faint line otherwise.</summary>
     public void RenderFrame()
     {
+        if (_desk.Stopping || _closing) return;
         var sw = Palette.Get(_desk.ColorOf(Card));
         bool overdue = Card.Overdue && Strip == null;
         Surface.BorderBrush = overdue ? Palette.Brush(Palette.Overdue) : IsActive && !Editing ? Palette.Brush(sw.Accent, 0.9) : Palette.Brush(sw.Ink, 0.12);
@@ -749,6 +754,7 @@ public partial class CardWindow : Window
 
     public void ShowBadge(string text)
     {
+        if (_desk.Stopping || _closing) return;
         BadgeText.Text = text;
         Badge.Visibility = Visibility.Visible;
         _badgeTimer.Stop();
@@ -778,8 +784,9 @@ public partial class CardWindow : Window
 
     public void BeginEdit(int? line = null, int? column = null)
     {
-        if (Editing || Strip != null) return;
+        if (_desk.Stopping || _closing || Editing || Strip != null) return;
         EndAdd();
+        if (Adding) return;
         if (Card.Collapsed) _desk.ToggleCollapse(this);
         LayoutPill = false;
         Editing = true;
@@ -810,7 +817,7 @@ public partial class CardWindow : Window
 
     public void EndEdit(bool returnFocus)
     {
-        if (!Editing) return;
+        if (_desk.Stopping || _closing || !Editing) return;
         Editing = false;
         _autosave.Stop();
         var text = Editor.Text.Replace("\r\n", "\n").TrimEnd();
@@ -818,9 +825,11 @@ public partial class CardWindow : Window
         Stack.Visibility = Visibility.Visible;
         var session = _session!;
         _session = null;
-        try { _desk.CommitEdit(this, text, session); }
+        bool keep;
+        try { keep = _desk.CommitEdit(this, text, session); }
         catch (Exception e)
         {
+            App.Log(e, "edit-save");
             // Not saved (database busy, disk full…): stay in edit mode so the text is not lost; autosave retries.
             Editing = true;
             _session = session;
@@ -830,15 +839,18 @@ public partial class CardWindow : Window
             _autosave.Start();
             return;
         }
+        // Persistence is complete. Rendering failures must reach the application boundary, not be mistaken for a failed save.
+        _desk.AfterCommitEdit(this, keep, session);
         if (returnFocus && ReturnFocus != IntPtr.Zero && Native.IsWindow(ReturnFocus)) Native.SetForegroundWindow(ReturnFocus);
         ReturnFocus = IntPtr.Zero;
     }
 
     void Autosave()
     {
-        if (!Editing || _session == null) return;
+        if (_desk.Stopping || _closing || !Editing || _session == null) return;
         try { _desk.SaveBody(this, Editor.Text.Replace("\r\n", "\n"), _session); }
-        catch (Exception e) { ShowBadge("保存失败，稍后自动重试：" + e.Message); _autosave.Start(); }
+        catch (Exception e) { ShowBadge("保存失败，稍后自动重试：" + e.Message); _autosave.Start(); return; }
+        Render();
     }
 
     /// <summary>The desk stored our text: remember it (external-change detection) and take the stored row.</summary>
@@ -988,7 +1000,7 @@ public partial class CardWindow : Window
     /// </summary>
     public void StartAdd()
     {
-        if (Adding || Editing || Strip != null || Ref < 0) return;
+        if (_desk.Stopping || _closing || Adding || Editing || Strip != null || Ref < 0) return;
         if (Card.Collapsed) _desk.ToggleCollapse(this);
         LayoutPill = false;
         var sw = Palette.Get(_desk.ColorOf(Card));
@@ -1013,8 +1025,11 @@ public partial class CardWindow : Window
                 e.Handled = true;
                 if (box.Text.Trim().Length == 0) { EndAdd(); return; }
                 var text = box.Text;
+                try { _desk.AddTasks(this, text, _addSession!); }
+                catch (Exception error) { App.Log(error, "quick-add-save"); ShowBadge("保存失败：" + error.Message); return; }
                 box.Text = "";
-                _desk.AddTasks(this, text, _addSession!);
+                Render();
+                _desk.Relayout();
             }
         };
         // A pasted list becomes one item per line (a one-line TextBox would keep only its first line).
@@ -1022,8 +1037,12 @@ public partial class CardWindow : Window
         {
             if (!e.SourceDataObject.GetDataPresent(DataFormats.UnicodeText) || e.SourceDataObject.GetData(DataFormats.UnicodeText) is not string t || !t.Contains('\n')) return;
             e.CancelCommand();
-            _desk.AddTasks(this, box.Text + t, _addSession!);
+            var pending = box.Text + t;
+            try { _desk.AddTasks(this, pending, _addSession!); }
+            catch (Exception error) { box.Text = pending; ShowBadge("保存失败：" + error.Message); return; }
             box.Text = "";
+            Render();
+            _desk.Relayout();
         });
         var input = new Grid();
         input.Children.Add(hint);
@@ -1048,17 +1067,76 @@ public partial class CardWindow : Window
     /// <summary>Closes quick add, keeping what was typed. Safe to call when it is not open.</summary>
     public void EndAdd()
     {
-        if (_adder is not { } box) return;
+        if (_desk.Stopping || _closing || _adder is not { } box) return;
         var text = box.Text;
         var g = _addSession!;
+        if (text.Trim().Length > 0)
+        {
+            try { _desk.AddTasks(this, text, g); }
+            catch (Exception error) { App.Log(error, "quick-add-save"); ShowBadge("保存失败：" + error.Message); return; }
+        }
         Row.Children.Remove(_adderHost);
         _adder = null;
         _adderHost = null;
         _addSession = null;
-        if (text.Trim().Length > 0) _desk.AddTasks(this, text, g); // re-renders the row
-        else RenderRow();
+        Render();
         _desk.Relayout(); // no longer held in place: back into the tiling
     }
+
+    /// <summary>Capture input without ending an edit, invoking layout, or changing the window.</summary>
+    internal EditDraft? CaptureDraft()
+    {
+        var add = _adder?.Text;
+        if (!Editing && string.IsNullOrWhiteSpace(add)) return null;
+        var snapshot = Card.Clone();
+        var editor = Editing ? Editor.Text.Replace("\r\n", "\n") : null;
+        if (editor != null) snapshot.Body = editor;
+        if (!string.IsNullOrWhiteSpace(add)) snapshot.Body = Markdown.AddTasks(snapshot.Body, add);
+        if (Ref < 0 && string.IsNullOrWhiteSpace(snapshot.Body) && snapshot.Images.Count == 0) return null;
+        var session = Editing ? _session : _addSession;
+        var number = session?.Number;
+        return new EditDraft(Guid.NewGuid().ToString("N"), snapshot, Ref > 0 ? Card.Rev : null, Ref, editor, add, number is > 0 ? number : null);
+    }
+
+    internal void AcceptDraft(EditDraft draft, Card saved, long groupNumber)
+    {
+        if (draft.Ref != Ref) return;
+        var session = Editing ? _session : _addSession;
+        if (groupNumber > 0 && session != null && session.Number != groupNumber)
+        {
+            session.Id = groupNumber;
+            session.Cards.Clear(); // Bookkeeping from a different group cannot refer to this recovery write.
+        }
+        if (Ref < 0) _desk.AcceptRecoveredCard(this, saved.Id);
+        Card = saved;
+        _editBase = saved.Body;
+        if (Editing) Card.Body = Editor.Text.Replace("\r\n", "\n");
+        if (_adder != null && _adder.Text == draft.AddText) _adder.Text = "";
+    }
+
+    internal void StopCallbacks()
+    {
+        _autosave.Stop();
+        _badgeTimer.Stop();
+        _hoverTimer.Stop();
+        _stripTimer.Stop();
+        _leaveTimer.Stop();
+    }
+
+    internal void SetSmokeEditorText(string text)
+    {
+        // Keep two independent pending inputs in a diagnostic run without moving focus between their windows.
+        Editing = true;
+        _session = _desk.Store.Begin();
+        _editBase = Card.Body;
+        Stack.Visibility = Visibility.Collapsed;
+        Editor.Visibility = Visibility.Visible;
+        Editor.Text = text;
+        _autosave.Stop();
+        Render();
+        Editor.Measure(new Size(260, 500));
+    }
+    internal void SetSmokeAddText(string text) { if (_adder != null) _adder.Text = text; }
 
     // ================= mouse & keyboard =================
 
@@ -1203,6 +1281,7 @@ public partial class CardWindow : Window
 
     IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        if (_desk.Stopping || _closing) return IntPtr.Zero;
         switch (msg)
         {
             case Native.WM_NCHITTEST:

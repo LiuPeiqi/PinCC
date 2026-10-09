@@ -5,6 +5,7 @@ using PinCC.Core;
 /// <summary>Fetch / Llm / Proc checks that need no network and start no model. Returns the number of failures.</summary>
 public static class FetchTests
 {
+    public static int Passed { get; private set; }
     public static int Run()
     {
         int failed = 0, passed = 0;
@@ -52,6 +53,12 @@ public static class FetchTests
         var loginText = Fetch.FromHtml("https://e.com/", login).Text;
         True(loginText.Contains("这是一段正文内容") && !loginText.Contains("用户名"), "small login form dropped");
 
+        True(Throws<SourceLimitException>(() => Fetch.FromHtml("https://e.com", new string('x', 2_000_001))), "HTML has a bounded parsing input");
+        var hostileHtml = string.Concat(Enumerable.Repeat("<script>", 20_000));
+        var parseClock = System.Diagnostics.Stopwatch.StartNew();
+        True(Throws<TimeoutException>(() => Fetch.MainText(hostileHtml)), "unclosed repeated tags hit the regex deadline");
+        True(parseClock.Elapsed < TimeSpan.FromSeconds(6), "hostile HTML cannot occupy the parser indefinitely");
+
         // ---------------- JSON-LD ----------------
         var ld = "<html><head><script type=\"application/ld+json\">{ broken json </script>" +
                  "<script type=\"application/ld+json\">{\"@type\":\"Thing\",\"headline\":{\"x\":1},\"description\":42}</script>" +
@@ -89,8 +96,69 @@ public static class FetchTests
                 Eq(Fetch.FileText(docx), "共享读取", "docx readable while open for writing elsewhere");
                 Eq(Fetch.FileText(txt), "文本内容", "text readable while open for writing elsewhere");
             }
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+            True(Throws<OperationCanceledException>(() => Fetch.FileText(docx, cancelled.Token)), "file text preserves caller cancellation");
+            True(Throws<OperationCanceledException>(() => Fetch.File(docx, cancelled.Token)), "file metadata does not swallow cancellation");
+
+            var manySlides = Path.Combine(dir, "many.pptx");
+            using (var zip = ZipFile.Open(manySlides, ZipArchiveMode.Create))
+                for (int i = 1; i <= Fetch.MaxOfficeParts + 1; i++)
+                    using (var w = new StreamWriter(zip.CreateEntry($"ppt/slides/slide{i}.xml").Open()))
+                        w.Write("<a:p><a:t>x</a:t></a:p>");
+            True(Throws<SourceLimitException>(() => Fetch.FileText(manySlides)), "Office limits total selected parts before expansion");
+            True(Fetch.File(manySlides).Meta.Error?.Contains("256") == true, "Office resource limit is visible in metadata");
+            var directoryBomb = Path.Combine(dir, "directory.docx");
+            using (var zip = ZipFile.Open(directoryBomb, ZipArchiveMode.Create))
+                for (int i = 0; i <= Fetch.MaxArchiveEntries; i++) zip.CreateEntry("n" + i);
+            // Lie in EOCD about the count. The bounded pre-scan must inspect real central headers, before ZipArchive allocation.
+            using (var file = new FileStream(directoryBomb, FileMode.Open, FileAccess.Write))
+            {
+                file.Position = file.Length - 14;
+                file.Write([1, 0, 1, 0]);
+            }
+            True(Throws<SourceLimitException>(() => Fetch.FileText(directoryBomb)), "ZIP limits actual central headers even when the declared count lies");
+
+
+
+            var expanded = Path.Combine(dir, "expanded.pptx");
+            using (var zip = ZipFile.Open(expanded, ZipArchiveMode.Create))
+            {
+                var chunk = new string('x', 64_000);
+                for (int i = 1; i <= 2; i++)
+                    using (var w = new StreamWriter(zip.CreateEntry($"ppt/slides/slide{i}.xml").Open()))
+                        for (int j = 0; j < 485; j++) w.Write(chunk); // each is below 60 MB; together they exceed it
+            }
+            var limitClock = System.Diagnostics.Stopwatch.StartNew();
+            True(Throws<SourceLimitException>(() => Fetch.FileText(expanded)), "Office checks cumulative XML size, not just each entry");
+            True(limitClock.Elapsed < TimeSpan.FromSeconds(5), "Office aggregate limit is checked before decompressing either part");
+
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
+
+        using (var release = new ManualResetEventSlim())
+        using (var entered = new CountdownEvent(2))
+        using (var readersStop = new CancellationTokenSource())
+        {
+            var first = Fetch.FileWorker<int>(token => { entered.Signal(); release.Wait(); token.ThrowIfCancellationRequested(); return 1; }, readersStop.Token);
+            var second = Fetch.FileWorker<int>(token => { entered.Signal(); release.Wait(); throw new IOException("late reader failure"); }, readersStop.Token);
+            try
+            {
+                True(entered.Wait(TimeSpan.FromSeconds(5)), "two file workers occupy the bounded pool");
+                var cancelClock = System.Diagnostics.Stopwatch.StartNew();
+                readersStop.Cancel();
+                True(Throws<OperationCanceledException>(() => first.GetAwaiter().GetResult())
+                    && Throws<OperationCanceledException>(() => second.GetAwaiter().GetResult()), "blocked readers release their callers on cancellation");
+                True(cancelClock.Elapsed < TimeSpan.FromSeconds(1), "blocked OS read cannot retain the waiting UI task");
+                bool thirdStarted = false;
+                using var queuedStop = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+                True(Throws<OperationCanceledException>(() => Fetch.FileWorker(token => { thirdStarted = true; return 3; }, queuedStop.Token).GetAwaiter().GetResult()),
+                    "file reader queue can be cancelled");
+                True(!thirdStarted, "cancelled callers do not free the slots of still-blocked readers");
+            }
+            finally { release.Set(); }
+            Eq(Fetch.FileWorker(token => 4).GetAwaiter().GetResult(), 4, "file slots are released when the actual workers exit");
+        }
 
         // ---------------- Cap / image magic ----------------
         var big = new string('a', 30_000) + "END";
@@ -194,8 +262,54 @@ public static class FetchTests
         True(err.Code != 0 && err.Err.Contains("nosuchcommand_pincc") && !err.Err.Contains('\uFFFD'), "proc: cmd.exe error readable: " + err.Err.Trim());
         var sw = System.Diagnostics.Stopwatch.StartNew();
         // A child that never reads stdin while we push 4 MB into it: the deadline must still fire.
-        var stuck = Throws(() => Proc.Run(cmdExe, [], new string('x', 4_000_000), TimeSpan.FromSeconds(2), rawArgs: "/d /c ping -n 30 127.0.0.1 >nul").GetAwaiter().GetResult());
+        var stuck = Throws<TimeoutException>(() => Proc.Run(cmdExe, [], new string('x', 4_000_000), TimeSpan.FromSeconds(2), rawArgs: "/d /c ping -n 30 127.0.0.1 >nul").GetAwaiter().GetResult());
         True(stuck && sw.Elapsed < TimeSpan.FromSeconds(10), $"proc: timeout covers the stdin write ({sw.Elapsed.TotalSeconds:0.0}s)");
+
+        using (var cancelled = new CancellationTokenSource())
+        {
+            cancelled.Cancel();
+            True(Throws<OperationCanceledException>(() => Proc.Run("pincc-no-such-program.exe", [], null, TimeSpan.FromSeconds(2), cancelled.Token).GetAwaiter().GetResult()),
+                "pre-cancelled process never attempts to start");
+        }
+
+        // Optional integration checks use only test helpers in an existing WSL distribution.
+        if (Environment.GetEnvironmentVariable("PINCC_TEST_WSL") == "1")
+        {
+            var wslExe = Path.Combine(Environment.SystemDirectory, "wsl.exe");
+            var distributions = Proc.Run(wslExe, ["--list", "--quiet"], null, TimeSpan.FromSeconds(10)).GetAwaiter().GetResult().Out.Replace("\0", "");
+            var distro = distributions.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+            True(distro != null, "WSL integration has an installed distribution");
+            if (distro != null)
+            {
+                Llm.Command Wsl(params string[] args) => Llm.StepCommand(args, true, distro, null, null, null);
+                Eq(Llm.Execute(Wsl("cat"), "WSL-STDIN", TimeSpan.FromSeconds(10), CancellationToken.None).GetAwaiter().GetResult(), "WSL-STDIN",
+                    "WSL background timeout wrapper preserves stdin");
+                Eq(Llm.Execute(Wsl("bash", "-c", "sleep 0.4; printf OK"), null, TimeSpan.FromSeconds(2), CancellationToken.None).GetAwaiter().GetResult(), "OK",
+                    "short WSL budget does not subtract a fixed five seconds");
+
+                var pidFile = "/tmp/pincc-test-" + Guid.NewGuid().ToString("N") + ".pid";
+                var child = Wsl("bash", "-c", "sleep 30 & child=$!; printf '%s' \"$child\" > \"$1\"; wait \"$child\"", "pincc-test", pidFile);
+                using var cancelled = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+                try
+                {
+                    True(Throws<OperationCanceledException>(() => Llm.Execute(child, null, TimeSpan.FromSeconds(20), cancelled.Token).GetAwaiter().GetResult()),
+                        "WSL running context cancellation remains cancellation");
+                    var check = Wsl("bash", "-c", "if [ -f \"$1\" ]; then pid=$(cat \"$1\"); if [ -r /proc/$pid/stat ] && [ \"$(awk '{print $3}' /proc/$pid/stat)\" != Z ]; then echo ALIVE; else echo DEAD; fi; else echo MISSING; fi", "pincc-test", pidFile);
+                    Eq(Llm.Execute(check, null, TimeSpan.FromSeconds(10), CancellationToken.None).GetAwaiter().GetResult(), "DEAD",
+                        "WSL cancellation terminates the Linux child group");
+                    Eq(Llm.Execute(Wsl("bash", "-c", "sleep 30 >/dev/null 2>&1 & child=$!; printf '%s' \"$child\" > \"$1\"; echo OK", "pincc-test", pidFile),
+                        null, TimeSpan.FromSeconds(10), CancellationToken.None).GetAwaiter().GetResult(), "OK",
+                        "normally exiting WSL tool still returns its answer");
+                    Eq(Llm.Execute(check, null, TimeSpan.FromSeconds(10), CancellationToken.None).GetAwaiter().GetResult(), "DEAD",
+                        "normal WSL completion also cleans surviving grandchildren");
+
+                }
+                finally
+                {
+                    Llm.Execute(Wsl("bash", "-c", "rm -f \"$1\"; echo OK", "pincc-test", pidFile), null, TimeSpan.FromSeconds(10), CancellationToken.None).GetAwaiter().GetResult();
+                }
+            }
+        }
 
         // ---------------- automatic reads check every redirect hop ----------------
         var server = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
@@ -221,11 +335,19 @@ public static class FetchTests
         catch (Exception e) { True(false, "auto redirect: unexpected " + e.GetType().Name + " " + e.Message); }
         var asked = Fetch.Web(start).GetAwaiter().GetResult(); // asked by the user: redirects are followed as usual
         Eq(asked.Text, "secret", "user-asked read follows redirects");
-        serve.Wait(TimeSpan.FromSeconds(5));
+        True(serve.Wait(TimeSpan.FromSeconds(5)), "redirect server handled every expected request");
         server.Stop();
 
+        Passed = passed;
         Console.WriteLine($"FetchTests: {passed} passed, {failed} failed");
         return failed;
+    }
+
+    static bool Throws<T>(Action a) where T : Exception
+    {
+        try { a(); return false; }
+        catch (T) { return true; }
+        catch { return false; }
     }
 
     static bool Throws(Action a)

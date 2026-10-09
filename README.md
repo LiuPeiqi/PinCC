@@ -106,7 +106,9 @@ output: summary
 - 飞书链接卡片上的 ✨ 会变成“✨ 飞书文档”；其他卡片照旧是摘要。条件越具体的技能越优先。卡片右键“技能 ›”可以选别的技能，桌面技能（例如按全部卡片排出今日计划）在 + 的右键菜单里。
 - 会运行程序或授权模型的技能，**第一次运行前会弹窗确认**（列出命令和授权）。之后文件一改，就会再确认一次。
 - 授权 `pincc` 时，模型可以自己调用 PinCC 命令行加卡片、加任务、写摘要。这次运行的所有写入算一个操作组，Ctrl+Z 或 `PinCC restore` 可以一次撤销。
-- 每次运行记录在数据目录的 `runs.log`。设置页“技能与执行器”显示生效的技能、执行器和文件错误。示例在 `docs/examples/skills`。
+- 每次模型调用的完成摘要记录在数据目录的 `runs.log`，取数、排队、模型执行、回写和终态另记在 `diagnostics.log`，通过 `run_id` 关联。日志不记录正文或完整提示词。
+- 任务从取数开始计入总预算，排队也计时；模型仍保留 Windows 150 秒、WSL 180 秒阶段上限。可通过数据库设置 `llm.run_timeout`（1–86400 秒）覆盖自动计算的总预算；默认兼容技能声明的长取数步骤。处理中可取消，命令行 `run` 支持 Ctrl+C；取消或过期的结果不再写回。
+- 设置页“技能与执行器”显示生效的技能、执行器和文件错误。示例在 `docs/examples/skills`。
 
 ---
 
@@ -162,7 +164,9 @@ echo "- [ ] 提交周报" | PinCC add - --remind "周五 17:00"
 - 数据目录：`%LOCALAPPDATA%\PinCC`（可以用环境变量 `PINCC_HOME` 指定其他位置）
   - `pincc.db`：SQLite（WAL 模式）
   - `img\`：粘贴或拖入的图片，按内容哈希命名
-  - `backup\`：每天自动备份一份，保留 7 份
+  - `backup\`：每天自动备份一份，保留 7 份；后台先写临时文件，成功后替换正式备份
+  - 恢复草稿：优先写入 `%LOCALAPPDATA%\PinCC\recovery-fallback\`，不可用时写入数据目录的 `recovery\`；下次启动按版本恢复，遇到并发修改保留草稿，避免覆盖新内容
+  - `error.log`：未处理异常；`diagnostics.log`：版本、PID、任务阶段及故障信息
 - **每次修改都会记录**：一次手势（一次编辑、一次拖动、一次“全部平铺”、一条 CLI 命令）是一组操作，可以整组撤销。撤销只写回这组操作改过的字段，之后别处的修改（例如 CLI 写入的摘要）不受影响。撤销本身也是一组操作，所以撤销也能再撤销。
 - 删除的卡片和操作记录保留 30 天（可设为 7/30/90/365 天）。完成的卡片一直保留，作为“已完成”归档。
 - 首次运行会设为开机启动（写入 `HKCU\…\Run`），可以在设置中关闭。
@@ -171,18 +175,27 @@ echo "- [ ] 提交周报" | PinCC add - --remind "周五 17:00"
 
 ## 构建
 
-需要 .NET 10 SDK。
+**依赖（不进仓库）**：零 NuGet；构建只需本机 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)；框架依赖版运行还需 [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)。也可用：
+
+```bat
+winget install Microsoft.DotNet.SDK.10
+winget install Microsoft.DotNet.DesktopRuntime.10
+```
+
+`build.cmd` 会先检查 SDK / Desktop Runtime，再继续构建。系统自带的 `winsqlite3.dll`、可选的本机 CLI LLM（claude / codex / …）都不打包进仓库。
 
 ```bat
 build.cmd
 ```
 
-脚本先运行测试（`tests/`，无需任何测试框架），然后生成两个版本：
+脚本先运行模块及隔离集成测试（`tests/`，无需任何测试框架），在临时目录发布两个版本，再对真实发布程序进行隔离的 WPF 生命周期测试。全部通过后才替换正式产物；替换失败回滚，成功后自动清理临时文件：
 
-- `dist\PinCC.exe`：框架依赖的单文件版，需要安装 .NET 10 Desktop Runtime
-- `dist\standalone\PinCC.exe`：自带运行时的单文件版
+- `dist\PinCC.exe`：框架依赖的单文件版（约 1 MB），需要安装 .NET 10 Desktop Runtime
+- `dist\standalone\PinCC.exe`：自带运行时的单文件版（约 60 MB）
 
-开发时可以用 `dotnet run --project src` 直接启动。
+正式产物用 Git LFS 存档（见 `.gitattributes`）；`bin/`、`obj/`、`.probe/`、诊断转储等中间文件不入库。
+
+开发时可以用 `dotnet run --project src` 直接启动。只运行模块及集成测试可用 `dotnet run --project tests -c Release`；已发布程序的 UI 回归可用 `powershell -NoProfile -File tests\UiSmoke.ps1 -Executable <PinCC.exe绝对路径>`。UI 测试使用独立数据目录与实例身份，覆盖正常编辑退出、布局异常、通知异常、退出清理异常及数据库保存失败，验证草稿、异常隔离及进程退出；成功自动清理，失败保留证据路径。设置 `PINCC_TEST_WSL=1` 可同时验证本机 WSL 的超时、取消与子进程清理。
 
 诊断：设置 `PINCC_SNAPSHOT=<目录>` 后启动，程序会在屏幕外把每张卡片渲染成 PNG，把显示器信息和窗口的物理坐标写入 `layout.json`，然后退出。锁屏时也能检查渲染和布局。
 
@@ -222,7 +235,7 @@ build.cmd
 src/Program.cs          入口：带参数 = 命令行，不带参数 = 桌面程序（单实例）
 src/Core/               纯逻辑：Db（winsqlite3）、Store（修改与操作记录）、Card（派生状态）、Cli、
                         When（时间解析）、Markdown、Fetch（网页/文档）、Llm、Agents（执行器）、Skills（技能管线）、
-                        Proc（子进程与 Job）
+                        Proc（子进程与 Job）、RunContext（截止时间与阶段）、Diagnostics（并发安全日志）
 builtin/                随程序发布的执行器（agents/*.json）和技能（skills/*/SKILL.md），与 Mac 版共用
 src/UI/                 WPF：Desk（唯一的修改入口与布局）、CardWindow、HubWindow（+ 按钮）、ManageWindow、
                         Flyout（提醒/颜色）、Layout（纯函数）、Native（Win32）、Hotkeys、MarkdownView、Theme.xaml

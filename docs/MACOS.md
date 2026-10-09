@@ -1114,6 +1114,8 @@ LintTests 扫描可移植目标，遇到以下写法就失败：
 - 新命令和参数与 Windows 相同（§4.2.8）：清单的 `--add-task`、`--check`、`--uncheck`，执行器和技能的 `skills`、`run`、`help --skill`；`PINCC_GROUP` 由 CLI 读取（§4.2.3）。内置执行器和技能嵌入在 `pincc` 里（§5.1），所以经符号链接调用时也不需要找 .app；用户文件在 `Home.resolve()` 下的 `agents/`、`skills/`。
 - P0 测量冷启动时间，并确认不闪 Dock、输出 UTF-8、退出码正确。
 
+Windows 稳定性契约补充（2026-10-09）：`runs.log` 的字段与模型阶段 `ms` 含义保持不变；阶段事件另写有版本的 `diagnostics.log`，追加/轮转需跨进程同步、有限等待和唯一临时文件。总任务预算从预读取开始，包含排队，保留合法长取数步骤；取消不得触发读取回退或继续回写。summary 与 append 检查输入变化，cards 在每次写入前检查取消。移植时以当前 `RunContext`、`SkillRun`、`Diagnostics` 和回归测试为准，上面的运行管线顺序是基础描述，不表示只在模型结束时才能记录诊断。
+
 ### 8.16 数据、日志与缓存目录
 
 - 数据：`Home.resolve()`。正式版默认 `~/Library/Application Support/PinCC`；开发版默认 `~/Library/Application Support/PinCC.dev`；两者都可用 `PINCC_HOME` 覆盖。是否开发版是**构建时常量**：`tools/mac.sh app` 生成 `BuildChannel.swift`（或传 `-Xswiftc -DPINCC_DEV`），GUI 和 `Helpers/pincc` 来自同一次构建，`Home.resolve()` 只读这个常量，运行时不读 bundle id（`Helpers/pincc` 是独立的 Mach-O，经 `~/.local/bin` 的符号链接调用时也看不到 .app 的 bundle id）。否则开发版和正式版共用一个数据库：正式版运行时开发版拿不到锁，发出的 `….dev.Show` 没人接收，直接退出；正式版没运行时开发版改的是真实数据，开发中的新格式一旦写进 `user_version`，正式版只能只读打开（Store.cs:61）。

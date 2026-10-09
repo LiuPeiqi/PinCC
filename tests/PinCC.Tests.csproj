@@ -1,5 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Dependency-free test harness for the pure modules. Run: dotnet run (in this folder) -->
+  <!-- Dependency-free regression harness: modules and isolated SQLite/filesystem/process integration.
+       Run: dotnet run (in this folder).
+       Published GUI lifecycle checks run separately through UiSmoke.ps1 in build.cmd. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>

@@ -76,17 +76,22 @@ public sealed partial class RunnerProfile
     public static RunnerProfile Parse(string json, string name, string origin)
     {
         RunnerProfile p;
-        try { p = JsonSerializer.Deserialize<RunnerProfile>(json, Json) ?? throw new FormatException("文件是空的"); }
-        catch (JsonException e) { throw new FormatException("JSON 格式错误：" + e.Message); }
+        try
+        {
+            using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+            CheckStructure(doc.RootElement);
+            p = JsonSerializer.Deserialize<RunnerProfile>(json, Json)!;
+        }
+        catch (JsonException e) { throw new FormatException("JSON 格式错误：" + e.Message, e); }
         p.Origin = origin;
-        if (p.Name != name) throw new FormatException($"name 必须与文件名一致（{name}）");
-        if (!NameRx().IsMatch(p.Name)) throw new FormatException("name 只能用小写字母、数字、. _ -");
+        if (p.Name != name) throw new FormatException($"$.name 必须与文件名一致（{name}）");
+        if (!NameRx().IsMatch(p.Name)) throw new FormatException("$.name 只能用小写字母、数字、. _ -");
         if (p.Name == "custom") throw new FormatException("custom 是保留名（自定义命令）");
         if (p.Args.Length == 0 && p.Command == null) throw new FormatException("缺少 args");
         if (p.Command != null && !CommandRx().IsMatch(p.Command)) throw new FormatException("command 只能是程序名或路径，不能含空格以外的特殊字符");
-        foreach (var a in p.Args) Placeholders(a, "args", "{model}", "{grants}");
+        for (var i = 0; i < p.Args.Length; i++) Placeholders(p.Args[i], $"$.args[{i}]", "{model}", "{grants}");
         if (p.Args.Count(a => a == "{model}") > 1 || p.Args.Count(a => a == "{grants}") > 1) throw new FormatException("{model}、{grants} 在 args 里最多各出现一次");
-        foreach (var a in p.Model ?? []) Placeholders(a, "model", "{value}");
+        for (var i = 0; i < (p.Model?.Length ?? 0); i++) Placeholders(p.Model![i], $"$.model[{i}]", "{value}");
         if (p.Model is { Length: > 0 } m && !m.Contains("{value}")) throw new FormatException("model 里要有 {value}");
         if (p.RequiresModel && p.Model is not { Length: > 0 }) throw new FormatException("requiresModel 需要同时写 model");
         foreach (var (key, tokens) in p.Grants ?? new())
@@ -104,6 +109,41 @@ public sealed partial class RunnerProfile
         return p;
     }
 
+    // Nullable annotations do not protect properties populated by JSON. Validate the effective
+    // (last, case-insensitive) property before inspecting tokens. Omitted fields stay optional.
+    static void CheckStructure(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) throw new FormatException("$ 必须是 JSON 对象");
+        var fields = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+        foreach (var property in root.EnumerateObject()) fields[property.Name] = property.Value;
+        if (fields.TryGetValue("name", out var name) && name.ValueKind != JsonValueKind.String)
+            throw new FormatException("$.name 必须是字符串，不能为 null");
+        foreach (var key in new[] { "args", "model", "listModels" })
+            if (fields.TryGetValue(key, out var value)) CheckTokens(value, "$." + key);
+        if (fields.TryGetValue("grants", out var grants))
+        {
+            if (grants.ValueKind != JsonValueKind.Object) throw new FormatException("$.grants 必须是对象，不能为 null");
+            foreach (var grant in grants.EnumerateObject().GroupBy(p => p.Name, StringComparer.Ordinal).Select(g => g.Last())) CheckTokens(grant.Value, "$.grants." + grant.Name);
+        }
+        if (fields.TryGetValue("promptEscapes", out var escapes))
+        {
+            if (escapes.ValueKind != JsonValueKind.Object) throw new FormatException("$.promptEscapes 必须是对象，不能为 null");
+            foreach (var escape in escapes.EnumerateObject().GroupBy(p => p.Name, StringComparer.Ordinal).Select(g => g.Last()))
+                if (escape.Value.ValueKind != JsonValueKind.String)
+                    throw new FormatException($"$.promptEscapes.{escape.Name} 必须是字符串，不能为 null");
+        }
+    }
+
+    static void CheckTokens(JsonElement value, string path)
+    {
+        if (value.ValueKind != JsonValueKind.Array) throw new FormatException($"{path} 必须是字符串数组，不能为 null");
+        var index = 0;
+        foreach (var token in value.EnumerateArray())
+        {
+            if (token.ValueKind != JsonValueKind.String) throw new FormatException($"{path}[{index}] 必须是字符串，不能为 null");
+            index++;
+        }
+    }
     /// <summary>A token may hold only the allowed placeholders, and those only as the whole token.</summary>
     static void Placeholders(string token, string where, params string[] allowed)
     {
@@ -123,14 +163,23 @@ public sealed partial class RunnerProfile
 /// </summary>
 public static class Runners
 {
-    static List<RunnerProfile>? _all;
-    static List<string> _errors = [];
-    static string? _home, _signature;
+    sealed record Cache(string Home, string Signature, IReadOnlyList<RunnerProfile> Profiles, IReadOnlyList<string> Errors);
+    static Cache? _cache;
     static readonly object Lock = new();
 
-    /// <summary>The loaded set (read on first use; <see cref="Refresh"/> picks up file changes — the desk does every few seconds).</summary>
-    public static IReadOnlyList<RunnerProfile> All { get { if (_all == null) Refresh(); return _all!; } }
-    public static IReadOnlyList<string> Errors { get { if (_all == null) Refresh(); return _errors; } }
+    static Cache Current
+    {
+        get
+        {
+            if (Volatile.Read(ref _cache) is { } cache) return cache;
+            Refresh();
+            return Volatile.Read(ref _cache)!;
+        }
+    }
+
+    /// <summary>The loaded set. GUI startup and refresh load it in the background; CLI callers may load synchronously.</summary>
+    public static IReadOnlyList<RunnerProfile> All => Current.Profiles;
+    public static IReadOnlyList<string> Errors => Current.Errors;
 
     public static RunnerProfile? Find(string name) => All.FirstOrDefault(p => p.Name == name);
 
@@ -140,11 +189,11 @@ public static class Runners
     /// <summary>Re-reads when the folder (or the data folder itself) changed; returns true when something did.</summary>
     public static bool Refresh(string? home = null)
     {
-        home ??= _home ?? Store.DefaultHome;
-        var sig = BuiltinFiles.Signature(Dir(home), "*.json");
+        home ??= Volatile.Read(ref _cache)?.Home ?? Store.DefaultHome;
         lock (Lock)
         {
-            if (_all != null && home == _home && sig == _signature) return false;
+            var sig = Signature(home);
+            if (_cache != null && home == _cache.Home && sig == _cache.Signature) return false;
             Load(home, sig);
             return true;
         }
@@ -153,8 +202,14 @@ public static class Runners
     /// <summary>Loads from <paramref name="home"/> now (tests, the settings page's 重新加载).</summary>
     public static void Reload(string? home = null)
     {
-        home ??= _home ?? Store.DefaultHome;
-        lock (Lock) Load(home, BuiltinFiles.Signature(Dir(home), "*.json"));
+        home ??= Volatile.Read(ref _cache)?.Home ?? Store.DefaultHome;
+        lock (Lock) Load(home, Signature(home));
+    }
+
+    static string Signature(string home)
+    {
+        try { return BuiltinFiles.Signature(Dir(home), "*.json"); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return "error:" + e.GetType().Name + ":" + e.Message; }
     }
 
     static void Load(string home, string sig)
@@ -168,37 +223,26 @@ public static class Runners
             catch (FormatException e) { errors.Add($"内置执行器 {name}：{e.Message}"); }
         }
         var dir = Dir(home);
-        if (Directory.Exists(dir))
-            foreach (var file in Directory.EnumerateFiles(dir, "*.json").OrderBy(f => f, StringComparer.Ordinal))
-            {
-                var name = Path.GetFileNameWithoutExtension(file);
-                try { map[name] = RunnerProfile.Parse(File.ReadAllText(file), name, file); }
-                catch (Exception e) when (e is FormatException or IOException or UnauthorizedAccessException) { errors.Add($"{file}：{e.Message}"); }
-            }
-        _all = map.Values.OrderBy(p => p.Priority).ThenBy(p => p.Name, StringComparer.Ordinal).ToList();
-        _errors = errors;
-        _home = home;
-        _signature = sig;
+        try
+        {
+            if (Directory.Exists(dir))
+                foreach (var file in Directory.EnumerateFiles(dir, "*.json").OrderBy(f => f, StringComparer.Ordinal))
+                {
+                    var name = Path.GetFileNameWithoutExtension(file);
+                    try { map[name] = RunnerProfile.Parse(File.ReadAllText(file), name, file); }
+                    catch (Exception e) when (e is FormatException or IOException or UnauthorizedAccessException) { errors.Add($"{file}：{e.Message}"); }
+                }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { errors.Add($"{dir}：{e.Message}"); }
+        // Readers never see a partially loaded set while a background refresh is in progress.
+        Volatile.Write(ref _cache, new Cache(home, sig,
+            Array.AsReadOnly(map.Values.OrderBy(p => p.Priority).ThenBy(p => p.Name, StringComparer.Ordinal).ToArray()),
+            errors.AsReadOnly()));
     }
 }
 
-/// <summary>One line per model run in runs.log (data folder): what ran, for whom, how it ended. Capped at 1 MB.</summary>
+/// <summary>One line per completed model run in runs.log. Existing fields and ms semantics are retained.</summary>
 public static class RunLog
 {
-    public static void Write(string home, object entry)
-    {
-        try
-        {
-            var path = Path.Combine(home, "runs.log");
-            var line = JsonSerializer.Serialize(entry, new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }) + "\n";
-            // One append per line: the GUI and the CLI may both be writing; a line is never split between them.
-            using (var f = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) f.Write(System.Text.Encoding.UTF8.GetBytes(line));
-            if (new FileInfo(path).Length <= 1_000_000) return;
-            // Trimmed through a temporary file and a rename: a crash never leaves half a log; lines stay LF.
-            var keep = string.Concat(File.ReadAllText(path).Split('\n', StringSplitOptions.RemoveEmptyEntries).TakeLast(500).Select(l => l + "\n"));
-            File.WriteAllText(path + ".tmp", keep);
-            File.Move(path + ".tmp", path, overwrite: true);
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { } // a log must never break a run
-    }
+    public static void Write(string home, object entry) => LogFile.Write(home, "runs.log", entry);
 }

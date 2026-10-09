@@ -30,7 +30,33 @@ public sealed record MdContext
 public static class MarkdownView
 {
     public static readonly FontFamily Ui = new("Microsoft YaHei UI, Segoe UI");
-    public static readonly FontFamily Mono = new("Cascadia Mono, Consolas, Microsoft YaHei UI");
+    public static readonly FontFamily Mono = SelectMono();
+
+    static FontFamily SelectMono()
+    {
+        // A registered font can be readable on disk yet fail DirectWrite matching. Probe once before using it in controls.
+        var available = new List<string>();
+        foreach (var name in new[] { "Cascadia Mono", "Consolas", "Microsoft YaHei UI" })
+        {
+            try
+            {
+                var family = new FontFamily(name);
+                bool matched = true;
+                foreach (var weight in new[] { FontWeights.Normal, FontWeights.Bold })
+                {
+                    if (!new Typeface(family, FontStyles.Normal, weight, FontStretches.Normal).TryGetGlyphTypeface(out _)) { matched = false; break; }
+                    var sample = new TextBlock { FontFamily = family, FontWeight = weight, Text = "PinCC 中文 0123", FontSize = 12 };
+                    sample.Measure(new Size(500, 100));
+                }
+                if (matched) available.Add(name);
+            }
+            catch (Exception e) when (e is UnauthorizedAccessException or System.IO.IOException or System.Runtime.InteropServices.COMException or ArgumentException or InvalidOperationException)
+            {
+                Diagnostics.Write(Store.DefaultHome, new { phase = "font", candidate = name, error = e.GetType().Name, hresult = $"0x{e.HResult:X8}" });
+            }
+        }
+        return available.Count > 0 ? new FontFamily(string.Join(", ", available)) : Ui;
+    }
     public static readonly FontFamily Icons = new("Segoe Fluent Icons, Segoe MDL2 Assets");
 
     /// <summary>Renders <paramref name="md"/>; <paramref name="lineOffset"/> maps block lines back to the full body (tasks, caret).</summary>

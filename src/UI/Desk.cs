@@ -45,8 +45,49 @@ public sealed class Desk
     (string Device, IntPtr Hwnd)? _fullscreen;
     int _lastMinute = -1, _tickCount;
     string _day = "";
+    readonly CancellationTokenSource _lifetime = new();
+    readonly Dictionary<long, CancellationTokenSource> _workStops = new();
+    Task? _maintenanceTask, _fileRefreshTask, _configRefreshTask;
+    bool _stopping, _disposed;
+    public bool Stopping => _stopping;
 
-    public Desk(Store store) => Store = store;
+    public Desk(Store store)
+    {
+        Store = store;
+        _msg.Fault += error => { if (Application.Current is App app) app.HandleFatal(error, "native-message"); };
+    }
+
+    internal void AcceptRecoveredCard(CardWindow w, long id) => Rekey(w, id);
+
+    internal void VerifySmokeSaveFailure()
+    {
+        var quick = _cards.Values.Single(w => w.Adding);
+        var editor = _cards.Values.Single(w => w.Editing);
+        Store.Db.Script("CREATE TEMP TRIGGER smoke_fail BEFORE UPDATE OF body ON cards BEGIN SELECT RAISE(ABORT, 'UI smoke save failure'); END;");
+        quick.EndAdd();
+        if (!quick.Adding) throw new InvalidOperationException("Quick-add draft was discarded");
+        quick.BeginEdit();
+        if (!quick.Adding || quick.Editing) throw new InvalidOperationException("Failed quick-add allowed edit mode");
+        Complete(quick);
+        if (!quick.Adding || !quick.Card.Active || quick.Strip != null) throw new InvalidOperationException("Failed quick-add allowed completion");
+        editor.EndEdit(returnFocus: false);
+        Complete(editor);
+        if (!editor.Editing || !editor.Card.Active || editor.Strip != null) throw new InvalidOperationException("Failed edit allowed completion");
+        Store.Db.Script("DROP TRIGGER smoke_fail;");
+    }
+
+    internal void MakeSmokeDrafts()
+    {
+        var screen = Screens.Primary;
+        var quick = NewCard(screen, "UI smoke checklist", edit: false);
+        var editor = NewCard(screen, "UI smoke baseline", edit: false);
+        var mono = new StackPanel();
+        MarkdownView.Render(mono, "```text\nUI smoke mono\n```", new MdContext { Ink = System.Windows.Media.Brushes.Black, Muted = System.Windows.Media.Brushes.Gray, Accent = System.Windows.Media.Brushes.Blue, Soft = System.Windows.Media.Brushes.White });
+        mono.Measure(new Size(500, 500));
+        quick.StartAdd();
+        quick.SetSmokeAddText("UI smoke quick add draft");
+        editor.SetSmokeEditorText("UI smoke editor draft");
+    }
 
     // ================= settings (cached; ApplySettings re-reads) =================
 
@@ -83,10 +124,11 @@ public sealed class Desk
 
     public void ApplySettings()
     {
+        if (_stopping) return;
         var before = Llm?.Describe();
         LoadSettings();
         if (Llm != null && Llm.Describe() != before) CatchUpSummaries(); // a tool was just set up or changed
-        RegisterHotkeys();
+        if (!Program.IsDiagnostic) RegisterHotkeys();
         foreach (var w in _cards.Values) w.Render();
         RebuildHubs();
         Relayout(force: true);
@@ -108,7 +150,7 @@ public sealed class Desk
         DoLayout(force: true);
 
         _hotkeys = new Hotkeys(_msg);
-        RegisterHotkeys();
+        if (!Program.IsDiagnostic) RegisterHotkeys();
         _msg.Message += OnSystemMessage;
         _tick.Tick += (_, _) => Tick();
         _layout.Tick += (_, _) => { _layout.Stop(); var f = _forceNext; _forceNext = false; DoLayout(f); };
@@ -122,45 +164,121 @@ public sealed class Desk
         foreach (var w in _cards.Values.Where(w => w.Card.Src != null && w.Card.SrcInfo == null).ToList()) _ = Enrich(w); // added by the CLI while closed
         CatchUpSummaries();
 
-        if (Store.Setting("llm.tool") == null && Store.Setting("llm.custom") == null && Store.Setting("llm.detected") == null) _ = DetectLlm();
-        if (Store.Setting("autostart") == null && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PINCC_HOME")))
+        if (!Program.IsDiagnostic && Store.Setting("llm.tool") == null && Store.Setting("llm.custom") == null && Store.Setting("llm.detected") == null) _ = DetectLlm();
+        if (!Program.IsDiagnostic && Store.Setting("autostart") == null && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PINCC_HOME")))
         {
             // First run: start with Windows by default, so cards and reminders come back after a reboot.
             try { SetAutoStart(true); Notify("已设为开机启动，可在“管理 › 设置”中关闭"); } catch { }
         }
-        else if (!startup && _cards.Count == 0) Notify("点 + 新建卡片 · 悬停 + 一键平铺/折叠/最小化 · 右键更多");
+        else if (Program.SmokeScenario == null && !startup && _cards.Count == 0) Notify("点 + 新建卡片 · 悬停 + 一键平铺/折叠/最小化 · 右键更多");
     }
 
     /// <summary>Windows is logging off (the user may still cancel): save open edits, keep everything running.</summary>
     public void Flush()
     {
-        foreach (var w in _cards.Values.Where(w => w.Editing).ToList()) w.EndEdit(returnFocus: false);
+        if (_stopping) return;
+        var drafts = CaptureDrafts();
+        if (drafts.Count == 0) return;
+        try
+        {
+            var saved = DraftRecovery.SaveCheckpoint(Store.Home, drafts, _ => { });
+            foreach (var draft in drafts)
+                if (saved.TryGetValue(draft.Key, out var result) && _cards.TryGetValue(draft.Ref, out var w))
+                {
+                    w.AcceptDraft(draft, result.Card, result.GroupNumber);
+                    if (result.GroupNumber > 0) Push(new Group { Id = result.GroupNumber });
+                }
+        }
+        catch (Exception error) { App.Log(error, "logoff-draft-save"); }
+    }
+
+    List<EditDraft> CaptureDrafts()
+    {
+        var drafts = new List<EditDraft>();
+        foreach (var w in _cards.Values.ToArray())
+        {
+            try { if (w.CaptureDraft() is { } draft) drafts.Add(draft); }
+            catch (Exception error) { App.Log(error, "draft-capture"); }
+        }
+        return drafts;
+    }
+
+    internal List<EditDraft> PrepareShutdown()
+    {
+        if (_stopping) return [];
+        _stopping = true;
+        _tick.Stop(); _layout.Stop(); _gestureEnd.Stop();
+        foreach (var w in _cards.Values) w.StopCallbacks();
+        try { _lifetime.Cancel(); } catch (Exception error) { App.Log(error, "task-cancel"); }
+        return CaptureDrafts();
     }
 
     public void Shutdown()
     {
-        Flush();
-        _tick.Stop();
-        _hotkeys?.Dispose();
-        _msg.Dispose();
+        if (_disposed) return;
+        _disposed = true;
+        PrepareShutdown();
+        try { _hotkeys?.Dispose(); } catch (Exception error) { App.Log(error, "hotkeys-dispose"); }
+        try { _msg.Dispose(); } catch (Exception error) { App.Log(error, "messages-dispose"); }
     }
 
     void Maintenance()
     {
-        _day = DateTime.Now.ToString("yyyyMMdd");
-        try { Store.Purge(Store.SettingInt("retention.days", 30)); } catch { /* never block the desk on cleanup */ }
-        try { Store.Backup(); } catch { }
+        if (_stopping || Program.SmokeScenario != null || _maintenanceTask is { IsCompleted: false }) return;
+        var days = Store.SettingInt("retention.days", 30);
+        var day = DateTime.Now.ToString("yyyyMMdd");
+        _maintenanceTask = MaintainAsync(days, day);
+    }
+
+    async Task MaintainAsync(int days, string day)
+    {
+        try
+        {
+            await Task.Run(() =>
+            {
+                using var maintenance = new Store(Store.Home, busyMs: 250);
+                maintenance.Purge(days, _lifetime.Token);
+                maintenance.Backup(_lifetime.Token);
+            }, _lifetime.Token);
+            if (!_stopping) _day = day;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error) { App.Log(error, "maintenance"); }
+    }
+
+    void RefreshConfigurations()
+    {
+        if (_stopping || _configRefreshTask is { IsCompleted: false }) return;
+        _configRefreshTask = RefreshConfigurationsAsync();
+    }
+
+    async Task RefreshConfigurationsAsync()
+    {
+        try
+        {
+            var changed = await Task.Run(() => Skills.Refresh(Store.Home) | Runners.Refresh(Store.Home), _lifetime.Token);
+            if (_stopping || !changed) return;
+            foreach (var w in _cards.Values) RenderAfterAsync(w);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error) { App.Log(error, "configuration-refresh"); }
     }
 
     public async Task<Llm?> DetectLlm()
     {
-        var found = await Llm.Detect();
-        if (found != null) found.Save(Store);
-        Store.SetSetting("llm.detected", true); // first-run detection happens once; afterwards the settings page decides
-        LoadSettings();
-        foreach (var w in _cards.Values) w.Render();
-        CatchUpSummaries();
-        return found;
+        try
+        {
+            var found = await Llm.Detect(_lifetime.Token);
+            if (_stopping) return null;
+            if (found != null) found.Save(Store);
+            Store.SetSetting("llm.detected", true);
+            LoadSettings();
+            foreach (var w in _cards.Values) RenderAfterAsync(w);
+            if (!_stopping) CatchUpSummaries();
+            return found;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return null; }
+        catch (Exception error) { App.Log(error, "runner-detect"); return null; }
     }
 
     /// <summary>
@@ -203,7 +321,15 @@ public sealed class Desk
 
     void Close(CardWindow w)
     {
+        if (!_cards.ContainsKey(w.Ref)) return;
+        if (w.CaptureDraft() is { } draft)
+        {
+            try { DraftRecovery.WriteFallback(Store.Home, [draft]); }
+            catch (Exception error) { App.Log(error, "closing-draft"); return; }
+        }
         if (!_cards.Remove(w.Ref)) return; // already closed (a strip timer and a reload may both get here)
+        if (_workStops.TryGetValue(w.Ref, out var stop)) { try { stop.Cancel(); } catch (Exception error) { App.Log(error, "card-cancel"); } }
+        w.StopCallbacks();
         _overflowHidden.Remove(w);
         _reenrich.Remove(w);
         if (_peek == w) _peek = null;
@@ -238,6 +364,7 @@ public sealed class Desk
     /// <summary>One journaled change to one card, applied to its window; returns the stored card.</summary>
     Card? Change(CardWindow w, Action<Card> change, string op, Group? g = null, bool push = true)
     {
+        if (_stopping) return null;
         if (w.Ref < 0) { change(w.Card); w.Render(); return w.Card; } // not stored yet (a new card being typed)
         g ??= Store.Begin();
         var r = Store.Mutate(g, w.Card.Id, change, op);
@@ -245,6 +372,27 @@ public sealed class Desk
         if (r == null) { Close(w); return null; }
         w.Update(r);
         return r;
+    }
+
+    internal void ReportNativeFailure(Exception error) => ((App)Application.Current).HandleFatal(error, "native-card");
+
+    Card PrepareNewCard(Screen screen, string body) => new()
+    {
+        Body = body, Mon = screen.Id, W = 260, Topmost = Store.SettingBool("top:" + screen.Id, false), CreatedAt = When.NowMs,
+    };
+
+    void DisplayCommittedCard(Card card)
+    {
+        if (_stopping) return;
+        try
+        {
+            _hidden = false;
+            var window = Adopt(card);
+            DoLayout(force: true);
+            if (!window.IsVisible) window.Show();
+            Native.Front(window.Hwnd, window.Topmost);
+        }
+        catch (Exception error) { ((App)Application.Current).HandleFatal(error, "committed-card-render"); }
     }
 
     // ================= derived presentation =================
@@ -272,7 +420,7 @@ public sealed class Desk
     /// <summary>Automatic summaries: public links, and documents we (or a file-reading CLI) can actually read.</summary>
     public bool AutoSummarizes(Card c) => AutoSummary && Llm is { } llm && c.Src is { } src && (c.IsLink
         ? Fetch.SafeToAuto(src)
-        : Directory.Exists(src) || Readable.Contains(Path.GetExtension(src).ToLowerInvariant()) || Path.GetExtension(src).Equals(".pdf", StringComparison.OrdinalIgnoreCase) && llm.Supports(LlmMode.File));
+        : c.SrcInfo?.FType == "文件夹" || Readable.Contains(Path.GetExtension(src).ToLowerInvariant()) || Path.GetExtension(src).Equals(".pdf", StringComparison.OrdinalIgnoreCase) && llm.Supports(LlmMode.File));
 
     /// <summary>For the hub: the color the next card gets (from the AUTOINCREMENT sequence), overflow and warnings.</summary>
     public int NextColor
@@ -298,6 +446,7 @@ public sealed class Desk
     public CardWindow NewCard(Screen s, string body = "", bool edit = true, List<string>? images = null, Size? size = null,
         IntPtr returnFocus = default, Group? group = null)
     {
+        if (_stopping) throw new OperationCanceledException("Desk is shutting down");
         _hidden = false;
         var c = new Card
         {
@@ -446,6 +595,7 @@ public sealed class Desk
 
     public void SaveBody(CardWindow w, string text, Group g)
     {
+        if (_stopping) throw new OperationCanceledException("Desk is shutting down");
         if (w.Ref < 0)
         {
             if (text.Trim().Length == 0 && w.Card.Images.Count == 0) return;
@@ -454,7 +604,7 @@ public sealed class Desk
             c = Store.Insert(g, c);
             Rekey(w, c.Id);
             w.Saved(c);
-            w.Render(); // the stored id decides the rotation color
+            // The caller renders after persistence succeeds.
             Push(g);
             return;
         }
@@ -462,20 +612,26 @@ public sealed class Desk
         if (r != null) { w.Saved(r); Push(g); }
     }
 
-    public void CommitEdit(CardWindow w, string text, Group g)
+    public bool CommitEdit(CardWindow w, string text, Group g)
     {
+        if (_stopping) throw new OperationCanceledException("Desk is shutting down");
         bool empty = text.Trim().Length == 0 && w.Card.Images.Count == 0;
-        if (w.Ref < 0 && empty) { Close(w); Relayout(force: true); return; } // abandoned new card: no row, no history
+        if (w.Ref < 0 && empty) return false; // abandoned new card: no row, no history
         if (w.Ref > 0 && empty && string.IsNullOrWhiteSpace(w.Card.Summary))
         {
             // An emptied card goes away; the same undo step brings the text back.
             Store.Mutate(g, w.Card.Id, c => { c.Body = ""; c.DeletedAt = When.NowMs; }, "delete");
             Push(g);
-            Close(w);
-            Relayout(force: true);
-            return;
+            return false;
         }
         SaveBody(w, text, g);
+        return true;
+    }
+
+    public void AfterCommitEdit(CardWindow w, bool keep, Group g)
+    {
+        if (_stopping) return;
+        if (!keep) { Close(w); Relayout(force: true); return; }
         // "Click +, paste a screenshot, click away": a lone picture floats at its natural size.
         if (w.Card.ImageOnly && w.Card.H == null) Change(w, c => { var n = NaturalSize(ScreenOf(w), c.Images[0]); c.W = n.Width; c.H = n.Height; }, "edit", g);
         w.Render();
@@ -487,7 +643,14 @@ public sealed class Desk
     public void ToggleTask(CardWindow w, int line) => Change(w, c => c.Body = Markdown.ToggleTask(c.Body, line), "edit");
 
     /// <summary>Quick add on a checklist: open items after the last task. One add session (<paramref name="g"/>) is one undo step.</summary>
-    public void AddTasks(CardWindow w, string text, Group g) => Change(w, c => c.Body = Markdown.AddTasks(c.Body, text), "edit", g);
+    public void AddTasks(CardWindow w, string text, Group g)
+    {
+        if (_stopping) throw new OperationCanceledException("Desk is shutting down");
+        var row = Store.Mutate(g, w.Card.Id, c => c.Body = Markdown.AddTasks(c.Body, text), "edit");
+        if (row == null) throw new InvalidOperationException("Card has been removed");
+        w.Saved(row);
+        Push(g);
+    }
 
     // ================= card actions =================
 
@@ -500,9 +663,11 @@ public sealed class Desk
     /// </summary>
     void Finish(CardWindow w, bool done)
     {
+        if (_stopping) return;
         w.EndAdd();
+        if (w.Adding) return;
         if (w.Editing) w.EndEdit(returnFocus: false);
-        if (!_cards.ContainsValue(w)) return;
+        if (w.Editing || !_cards.ContainsValue(w)) return;
         if (w.Ref < 0) { Close(w); Relayout(force: true); return; }
         var g = Store.Begin();
         var r = Store.Mutate(g, w.Card.Id, c => { if (done) c.DoneAt = When.NowMs; else c.DeletedAt = When.NowMs; }, done ? "done" : "delete");
@@ -544,9 +709,11 @@ public sealed class Desk
 
     public void ToggleCollapse(CardWindow w)
     {
+        if (_stopping) return;
         w.EndAdd();
+        if (w.Adding) return;
         if (w.Editing) w.EndEdit(returnFocus: false);
-        if (!_cards.ContainsValue(w)) return;
+        if (w.Editing || !_cards.ContainsValue(w)) return;
         w.LayoutPill = false;
         if (_peek == w) _peek = null;
         Change(w, c => c.Collapsed = !c.Collapsed, "view");
@@ -790,6 +957,7 @@ public sealed class Desk
 
     public void ShowAll()
     {
+        if (_stopping) return;
         _hidden = false;
         DoLayout(force: true);
         foreach (var w in _cards.Values.Where(w => w.IsVisible)) Native.Front(w.Hwnd, w.Topmost);
@@ -879,6 +1047,7 @@ public sealed class Desk
 
     public void Relayout(bool force = false)
     {
+        if (_stopping) return;
         _forceNext |= force;
         _layout.Stop();
         _layout.Start();
@@ -892,6 +1061,7 @@ public sealed class Desk
     /// </summary>
     void DoLayout(bool force)
     {
+        if (_stopping) return;
         Screens.Invalidate();
         var screens = Screens.All();
         var primary = screens.FirstOrDefault(s => s.Primary) ?? screens[0];
@@ -1008,10 +1178,11 @@ public sealed class Desk
 
     void OnSystemMessage(int msg, IntPtr wParam, IntPtr lParam)
     {
+        if (_stopping) return;
         if (msg == Native.WM_DISPLAYCHANGE || msg == Native.WM_SETTINGCHANGE && wParam.ToInt32() == Native.SPI_SETWORKAREA)
         {
             Screens.Invalidate();
-            Application.Current.Dispatcher.BeginInvoke(() => { RebuildHubs(); Relayout(force: true); }, DispatcherPriority.Background);
+            Application.Current.Dispatcher.BeginInvoke(() => { if (!_stopping) { RebuildHubs(); Relayout(force: true); } }, DispatcherPriority.Background);
         }
         else if (msg == Native.WM_TIMECHANGE)
         {
@@ -1025,6 +1196,7 @@ public sealed class Desk
 
     void RebuildHubs()
     {
+        if (_stopping) return;
         foreach (var h in _hubs) h.Close();
         _hubs.Clear();
         foreach (var s in Screens.All())
@@ -1038,6 +1210,7 @@ public sealed class Desk
 
     void UpdateHubs()
     {
+        if (_stopping) return;
         foreach (var h in _hubs) h.Refresh();
     }
 
@@ -1054,9 +1227,10 @@ public sealed class Desk
 
     void Tick()
     {
+        if (_stopping) return;
         Poll();
         // Skill and runner files are read again when they change (every few seconds is plenty); ✨ labels follow.
-        if (++_ticks % 5 == 0 && (Skills.Refresh() | Runners.Refresh())) foreach (var w in _cards.Values) w.Render();
+        if (++_ticks % 5 == 0) RefreshConfigurations();
 
         // Every reminder rings once when due, however it got there (picker, snooze, CLI, a time already past).
         var due = _cards.Values.Where(w => w.Card.Overdue && w.Strip == null && !_rung.Contains((w.Card.Id, w.Card.RemindAt!.Value))).ToList();
@@ -1111,24 +1285,51 @@ public sealed class Desk
     /// <summary>File cards follow their file: a changed size/date or a deleted file re-reads the facts (and marks the summary stale).</summary>
     void RefreshFiles()
     {
-        foreach (var w in _cards.Values.Where(w => w.Card.IsFile && w.Busy == null && w.Card.SrcInfo is { } m && m.State != "manual").ToList())
+        if (_stopping || _fileRefreshTask is { IsCompleted: false }) return;
+        var snapshot = _cards.Values.Where(w => w.Card.IsFile && w.Busy == null && w.Card.SrcInfo is { State: not "manual" })
+            .Select(w => new FileProbe(w.Ref, w.Card.Rev, w.Card.Src!, w.Card.SrcInfo!.Size, w.Card.SrcInfo.Mtime, w.Card.SrcInfo.State)).ToArray();
+        _fileRefreshTask = RefreshFilesAsync(snapshot);
+    }
+
+    sealed record FileProbe(long Id, long Rev, string Path, long? Size, long? Mtime, string? State);
+
+    async Task RefreshFilesAsync(FileProbe[] snapshot)
+    {
+        try
         {
-            var m = w.Card.SrcInfo!;
-            var path = w.Card.Src!;
-            bool changed;
-            try
+            var changed = await Task.Run(() =>
             {
-                if (Directory.Exists(path)) changed = false;
-                else if (!File.Exists(path)) changed = m.State != "missing";
-                else
+                var result = new List<FileProbe>();
+                var elapsed = Stopwatch.StartNew();
+                foreach (var probe in snapshot)
                 {
-                    var f = new FileInfo(path);
-                    changed = m.State == "missing" || f.Length != m.Size || new DateTimeOffset(f.LastWriteTimeUtc).ToUnixTimeMilliseconds() != m.Mtime;
+                    _lifetime.Token.ThrowIfCancellationRequested();
+                    if (elapsed.Elapsed > TimeSpan.FromSeconds(10)) break;
+                    try
+                    {
+                        if (Directory.Exists(probe.Path)) continue;
+                        if (!File.Exists(probe.Path))
+                        {
+                            if (probe.State != "missing") result.Add(probe);
+                        }
+                        else
+                        {
+                            var info = new FileInfo(probe.Path);
+                            if (probe.State == "missing" || info.Length != probe.Size
+                                || new DateTimeOffset(info.LastWriteTimeUtc).ToUnixTimeMilliseconds() != probe.Mtime) result.Add(probe);
+                        }
+                    }
+                    catch (Exception error) when (error is IOException or UnauthorizedAccessException) { App.Log(error, "file-probe"); }
                 }
-            }
-            catch { changed = false; }
-            if (changed) _ = Enrich(w);
+                return result;
+            }, _lifetime.Token);
+            if (_stopping) return;
+            foreach (var probe in changed)
+                if (_cards.TryGetValue(probe.Id, out var w) && w.Card.Rev == probe.Rev && w.Card.Src == probe.Path && w.Busy == null)
+                    _ = Enrich(w);
         }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error) { App.Log(error, "file-refresh"); }
     }
 
     void Poll()
@@ -1143,6 +1344,7 @@ public sealed class Desk
     /// <summary>Re-reads every row (dozens) and applies the differences to the windows.</summary>
     public void Reload()
     {
+        if (_stopping) return;
         var rows = Store.All().ToDictionary(c => c.Id);
         foreach (var w in _cards.Values.Where(w => w.Ref > 0).ToList())
         {
@@ -1166,90 +1368,163 @@ public sealed class Desk
     /// <summary>A card whose source has no facts yet (new, or changed by the CLI or a drop) gets them read.</summary>
     void MaybeEnrich(CardWindow w)
     {
-        if (w.Card.Src != null && w.Card.SrcInfo == null && _cards.ContainsValue(w)) _ = Enrich(w);
+        if (!_stopping && w.Card.Src != null && w.Card.SrcInfo == null && _cards.ContainsValue(w)) _ = Enrich(w);
     }
 
     /// <summary>Reads a card's source (web page or file) into its metadata, then summarizes it when that is automatic.</summary>
-    public async Task Enrich(CardWindow w, bool userAsked = false, Skill? then = null)
+    public async Task<Page?> Enrich(CardWindow w, bool userAsked = false, RunContext? context = null, bool runAfter = true)
     {
-        if (w.Busy != null) { _reenrich.Add(w); return; } // busy with the old source: run again when it finishes
-        var c = w.Card;
-        var src = c.Src;
-        if (src == null) return;
-        CardMeta meta;
-        Page? page = null;
-        (byte[] Bytes, string Ext)? picture = null;
+        try { return await EnrichCore(w, userAsked, context, runAfter); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return null; }
+        catch (Exception error)
+        {
+            if (context != null) throw;
+            App.Log(error, "source-start");
+            if (!_stopping && _cards.ContainsValue(w)) { w.Problem = "读取失败：" + error.Message; RenderAfterAsync(w); }
+            return null;
+        }
+    }
+
+    async Task<Page?> EnrichCore(CardWindow w, bool userAsked, RunContext? context, bool runAfter)
+    {
+        if (_stopping || !_cards.ContainsValue(w)) return null;
+        if (context == null && _workStops.ContainsKey(w.Ref)) { _reenrich.Add(w); return null; }
+        if (w.Busy != null)
+        {
+            _reenrich.Add(w);
+            if (context != null) throw new InvalidOperationException("正在读取来源，请稍后重试");
+            return null;
+        }
+        var src = w.Card.Src;
+        if (src == null) return null;
+        using var stop = context == null ? CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token) : null;
+        using var owned = context == null ? RunContext.Start(Store, TimeSpan.FromSeconds(90), stop!.Token, skillName: "source", card: w.Ref) : null;
+        var run = context ?? owned!;
+        if (stop != null) _workStops[w.Ref] = stop;
+        bool autoRun = false;
+        Page? completedPage = null;
         try
         {
-            if (c.IsLink)
+            CardMeta meta;
+            Page? page = null;
+            (byte[] Bytes, string Ext)? picture = null;
+            using (run.Phase("source"))
             {
-                // Links are fetched only when automatic reading is on and the address is public (resolved), or when asked.
-                if (!userAsked && !(AutoSummary && await Fetch.SafeToAutoAsync(src)))
+                var c = w.Card.Clone();
+                if (c.IsLink)
                 {
-                    SaveMeta(w, new CardMeta { Src = src, State = "manual" });
-                    return;
-                }
-                w.Busy = "正在读取网页…";
-                w.Render();
-                string? error = null;
-                try { page = await Fetch.Web(src, auto: !userAsked); }
-                catch (UnsafeRedirectException)
-                {
-                    SaveMeta(w, new CardMeta { Src = src, State = "manual" }); // the user can still ask (✨): then it is read as asked
-                    return;
-                }
-                catch (Exception e) { error = e is TaskCanceledException or OperationCanceledException ? "超时" : e.Message; }
-                if (page is { Image: { } bytes }) picture = (bytes, page.ImageExt ?? ".png");
-                else if (page == null || page.Thin && page.Download == null)
-                {
-                    try
+                    if (!userAsked && !(AutoSummary && await Fetch.SafeToAutoAsync(src, run.Token)))
                     {
-                        if (await Fetch.Rendered(src) is { } r && r.Text.Length > (page?.Text.Length ?? 0))
-                            page = r with { Title = r.Title ?? page?.Title, Desc = r.Desc ?? page?.Desc };
+                        run.ThrowIfStopped();
+                        if (!_stopping && _cards.ContainsValue(w) && w.Card.Src == src) SaveMeta(w, new CardMeta { Src = src, State = "manual" });
+                        owned?.Complete("skipped");
+                        return null;
                     }
-                    catch { }
+                    run.ThrowIfStopped();
+                    if (_stopping || !_cards.ContainsValue(w) || w.Card.Src != src) return null;
+                    w.Busy = "正在读取网页…";
+                    w.Render();
+                    string? error = null;
+                    try { page = await Fetch.Web(src, run.Token, auto: !userAsked, context: run); }
+                    catch (UnsafeRedirectException)
+                    {
+                        run.ThrowIfStopped();
+                        if (!_stopping && _cards.ContainsValue(w) && w.Card.Src == src) SaveMeta(w, new CardMeta { Src = src, State = "manual" });
+                        owned?.Complete("skipped");
+                        return null;
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (TimeoutException) { throw; }
+                    catch (Exception failure) { error = failure.Message; }
+                    run.ThrowIfStopped();
+                    if (page is { Image: { } bytes }) picture = (bytes, page.ImageExt ?? ".png");
+                    else if (page == null || page.Thin && page.Download == null)
+                    {
+                        try
+                        {
+                            if (await Fetch.Rendered(src, run.Token, run) is { } rendered && rendered.Text.Length > (page?.Text.Length ?? 0))
+                                page = rendered with { Title = rendered.Title ?? page?.Title, Desc = rendered.Desc ?? page?.Desc };
+                        }
+                        catch (OperationCanceledException) { throw; }
+                        catch (TimeoutException) { throw; }
+                        catch (Exception failure) { App.Log(failure, "rendered-source"); }
+                    }
+                    meta = picture != null ? new CardMeta { Src = src } : new CardMeta
+                    {
+                        Src = src, Title = page?.Title, Site = page?.Site, Desc = page?.Desc, Date = page?.Date,
+                        TextHash = page is { Thin: false } ? Card.Hash(page.Text) : page?.Download is { } download ? Card.Hash(download) : null,
+                        State = page == null || page.Thin && page.Download == null ? "blocked" : null, Error = page == null ? error : null,
+                    };
                 }
-                meta = picture != null ? new CardMeta { Src = src } : new CardMeta
+                else
                 {
-                    Src = src, Title = page?.Title, Site = page?.Site, Desc = page?.Desc, Date = page?.Date,
-                    TextHash = page is { Thin: false } ? Card.Hash(page.Text) : page?.Download is { } d ? Card.Hash(d) : null,
-                    State = page == null || page.Thin && page.Download == null ? "blocked" : null, Error = page == null ? error : null,
-                };
+                    w.Busy = "正在读取文件…";
+                    w.Render();
+                    (meta, var text) = await Fetch.FileAsync(src, run.Token, run);
+                    meta.TextHash = text.Length > 0 ? Card.Hash(text) : meta.Mtime is long time ? Card.Hash(src + time) : null;
+                }
             }
-            else
+            run.ThrowIfStopped();
+            if (_stopping || !_cards.ContainsValue(w)) return null;
+            if (w.Card.Src != src) { owned?.Complete("stale"); return null; }
+            if (picture is { } pic)
             {
-                w.Busy = "正在读取文件…";
-                w.Render();
-                (meta, var text) = await Task.Run(() => Fetch.File(src));
-                meta.TextHash = text.Length > 0 ? Card.Hash(text) : meta.Mtime is long m ? Card.Hash(src + m) : null;
+                await BecomePicture(w, src, pic.Bytes, pic.Ext, run);
+                owned?.Complete("success");
+                return page;
             }
+            var previous = w.Card.Info;
+            meta.SumHash = previous?.Src == src ? previous.SumHash : string.IsNullOrWhiteSpace(w.Card.Summary) ? null : "source-changed";
+            SaveMeta(w, meta);
+            owned?.Complete("success");
+            autoRun = runAfter && AutoRuns(w.Card) && (w.Card.SummaryStale || string.IsNullOrWhiteSpace(w.Card.Summary));
+            completedPage = page;
+            return page;
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested || stop?.IsCancellationRequested == true)
+        {
+            owned?.Complete("cancelled");
+            if (context != null) throw;
+            return null;
+        }
+        catch (Exception error)
+        {
+            owned?.Complete(error is TimeoutException ? "timeout" : "failed", error.Message);
+            if (context != null) throw;
+            App.Log(error, "source-read");
+            if (!_stopping && _cards.ContainsValue(w))
+            {
+                w.Problem = "读取失败：" + error.Message;
+                RenderAfterAsync(w);
+            }
+            return null;
         }
         finally
         {
-            w.Busy = null;
+            if (stop != null && _workStops.TryGetValue(w.Ref, out var current) && ReferenceEquals(current, stop)) _workStops.Remove(w.Ref);
+            if (!_stopping && _cards.ContainsValue(w))
+            {
+                // A chained automatic skill owns its new status.
+                if (!_summarizing.Contains(w.Ref)) w.Busy = null;
+                RenderAfterAsync(w);
+                if (autoRun) AutoRun(w, completedPage);
+                else if (_reenrich.Remove(w)) MaybeEnrich(w);
+            }
         }
-        if (!_cards.ContainsValue(w)) return;
-        if (w.Card.Src != src) { w.Render(); MaybeEnrich(w); return; } // the source changed meanwhile: read the new one
-        if (picture is { } pic)
-        {
-            await BecomePicture(w, src, pic.Bytes, pic.Ext);
-            if (_cards.ContainsValue(w)) { w.Render(); MaybeEnrich(w); }
-            return;
-        }
-        var prev = w.Card.Info;
-        // A summary of a different source must show as stale (never as current); same source keeps its bookkeeping.
-        meta.SumHash = prev?.Src == src ? prev.SumHash : string.IsNullOrWhiteSpace(w.Card.Summary) ? null : "source-changed";
-        SaveMeta(w, meta);
-        if (then != null && Llm != null) RunSkill(w, then, page, userAsked);
-        else if (AutoRuns(w.Card) && (w.Card.SummaryStale || string.IsNullOrWhiteSpace(w.Card.Summary))) AutoRun(w, page);
-        else if (_reenrich.Remove(w)) MaybeEnrich(w);
     }
 
-    /// <summary>A link that is itself a picture turns into a floating picture card (the address is kept in its metadata).</summary>
-    async Task BecomePicture(CardWindow w, string src, byte[] bytes, string ext)
+    void RenderAfterAsync(CardWindow w)
     {
-        var img = await Task.Run(() => Store.SaveImage(bytes, ext));
-        if (!_cards.ContainsValue(w) || w.Card.Src != src) return;
+        if (_stopping || !_cards.ContainsValue(w)) return;
+        try { w.Render(); }
+        catch (Exception error) { ((App)Application.Current).HandleFatal(error, "async-render"); }
+    }
+
+    async Task BecomePicture(CardWindow w, string src, byte[] bytes, string ext, RunContext run)
+    {
+        var img = await Task.Run(() => Store.SaveImage(bytes, ext), run.Token);
+        run.ThrowIfStopped();
+        if (_stopping || !_cards.ContainsValue(w) || w.Card.Src != src) return;
         var size = NaturalSize(ScreenOf(w), img);
         Change(w, c =>
         {
@@ -1263,10 +1538,10 @@ public sealed class Desk
 
     void SaveMeta(CardWindow w, CardMeta meta)
     {
+        if (_stopping || !_cards.ContainsValue(w)) return;
         if (w.Ref < 0) { w.Card.Meta = meta.ToJson(); w.Render(); return; }
-        // Derived facts are not a user action: saved without a history entry.
-        var r = Store.Mutate(Store.Begin(), w.Card.Id, c => c.Meta = meta.ToJson(), "meta", journal: false);
-        if (r != null) w.Update(r);
+        var row = Store.Mutate(Store.Begin(), w.Card.Id, c => c.Meta = meta.ToJson(), "meta", journal: false);
+        if (row != null) w.Update(row);
     }
 
     /// <summary>Roughly how many characters fit the card, so the summary does not overflow (requirement 5).</summary>
@@ -1296,7 +1571,7 @@ public sealed class Desk
     /// <summary>✨ (or 重试 after a failed run) on a card: its skill, asked for — also one that otherwise only runs by itself.</summary>
     public void Ask(CardWindow w)
     {
-        Skills.Refresh();
+        RefreshConfigurations();
         if ((AskSkill(w.Card) ?? Skills.Best(w.Card)) is { } skill) RunSkill(w, skill);
     }
 
@@ -1315,78 +1590,132 @@ public sealed class Desk
     /// </summary>
     public async void RunSkill(CardWindow w, Skill skill, Page? page = null, bool userAsked = true)
     {
+        if (_stopping || w.Ref < 0 || !_cards.ContainsValue(w)) return;
+        if (_workStops.ContainsKey(w.Ref)) { if (userAsked) Notify("任务正在运行，可在右键菜单取消"); return; }
         if (Llm is not { } llm) { if (userAsked) Notify("没有可用的 CLI LLM：在“管理 › 设置 › AI 摘要”中选择"); return; }
-        if (w.Ref < 0) return;
-        var c = w.Card;
-        if (skill.Reads("source") && c.Src != null && (c.SrcInfo == null || c.SrcInfo.State == "manual"))
-        {
-            await Enrich(w, userAsked: true, then: skill); // read the source first; Enrich continues with this skill
-            return;
-        }
         if (!Approved(skill) && !(userAsked && Confirm(skill, w))) return;
         var id = w.Ref;
         if (!_summarizing.Add(id)) return;
-        bool summary = skill.Builtin && skill.Name == "summary";
-        w.Problem = null;
-        w.Busy = summary ? "✨ 摘要中…" : $"✨ {skill.Label}…";
-        w.Render();
-        var g = Store.Begin();
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        _workStops[id] = stop;
+        RunContext? run = null;
+        var group = Store.Begin();
+        var summary = skill.Builtin && skill.Name == "summary";
         try
         {
-            if (skill.Grants.Contains("pincc")) Store.Reserve(g);
-            var res = await SkillRun.Run(new SkillRequest
+            run = RunContext.Start(Store, skill, llm, stop.Token, id);
+            if (skill.Reads("source") && w.Card.Src != null && (w.Card.SrcInfo == null || w.Card.SrcInfo.State == "manual"))
+                page = await Enrich(w, userAsked: true, context: run, runAfter: false);
+            run.ThrowIfStopped();
+            if (_stopping || !_cards.ContainsValue(w)) { run.Complete("stale"); return; }
+            var card = w.Card.Clone();
+            w.Problem = null;
+            w.Busy = summary ? "✨ 摘要中…" : $"✨ {skill.Label}…";
+            w.Render();
+            if (skill.Grants.Contains("pincc")) Store.Reserve(group);
+            var result = await SkillRun.Run(new SkillRequest
             {
-                Skill = skill, Llm = llm, Store = Store, Card = c, Budget = Budget(w), Page = page, UserAsked = userAsked,
-                Template = summary ? Store.Setting("llm.prompt") : null, Group = g.Empty ? null : g.Number,
-            });
-            if (res == null || !_cards.TryGetValue(id, out var live)) return;
-            var (r, _) = SkillRun.Apply(Store, g, skill, res, id, (body, grp) => NewCard(ScreenOf(live), body, edit: false, group: grp).Card);
-            Store.Release(g); // a run that wrote nothing leaves no undo step
-            if (userAsked || skill.Grants.Contains("pincc")) Push(g);
-            if (r != null && r.Id == id) live.Update(r);
-            if (skill.Output == "none") Notify($"「{skill.Label}」：" + FirstLine(res.Text));
+                Skill = skill, Llm = llm, Store = Store, Card = card, Budget = Budget(w), Page = page, UserAsked = userAsked,
+                Template = summary ? Store.Setting("llm.prompt") : null, Group = group.Empty ? null : group.Number, Context = run,
+            }, run.Token);
+            run.ThrowIfStopped();
+            if (_stopping || result == null || !_cards.TryGetValue(id, out var live)) { run.Complete("stale"); return; }
+            var (row, _) = SkillRun.Apply(Store, group, skill, result, id,
+                newCard: body => PrepareNewCard(ScreenOf(live), body), context: run, committedCard: DisplayCommittedCard);
+            if (_stopping) { run.Complete("success"); return; }
+            Store.Release(group);
+            if (userAsked || skill.Grants.Contains("pincc")) Push(group);
+            if (row != null && row.Id == id) live.Update(row);
+            if (skill.Output == "none") Notify($"「{skill.Label}」：" + FirstLine(result.Text));
             if (skill.Output is "append" or "cards") Relayout(force: true);
+            run.Complete(row == null && skill.Output != "none" ? "stale" : "success");
         }
-        catch (Exception e)
+        catch (OperationCanceledException) when (stop.IsCancellationRequested)
         {
-            w.Problem = (summary ? "摘要" : skill.Label) + "失败：" + (e.Message.Length > 120 ? e.Message[..120] + "…" : e.Message);
+            run?.Complete(_lifetime.IsCancellationRequested ? "cancelled-exit" : "cancelled");
+            if (!_stopping) w.Problem = "任务已取消";
+        }
+        catch (Exception error)
+        {
+            run?.Complete(error is TimeoutException ? "timeout" : "failed", error.Message);
+            App.Log(error, "skill");
+            if (!_stopping) w.Problem = (summary ? "摘要" : skill.Label) + "失败：" + FirstLine(error.Message);
         }
         finally
         {
-            Store.Release(g);
-            _summarizing.Remove(id);
-            w.Busy = null;
-            if (_cards.ContainsValue(w))
+            if (!_stopping)
             {
-                w.Render();
+                try { Store.Release(group); } catch (Exception error) { App.Log(error, "skill-release"); }
+            }
+            run?.Dispose();
+            _summarizing.Remove(id);
+            if (_workStops.TryGetValue(id, out var current) && ReferenceEquals(current, stop)) _workStops.Remove(id);
+            if (!_stopping && _cards.ContainsValue(w))
+            {
+                w.Busy = null;
+                RenderAfterAsync(w);
                 if (_reenrich.Remove(w)) MaybeEnrich(w);
             }
         }
     }
 
-    /// <summary>A desk skill (menu of +): reads the whole desk; its cards land on <paramref name="s"/>. One undo step.</summary>
-    public async void RunDeskSkill(Skill skill, Screen s)
+    public async void RunDeskSkill(Skill skill, Screen screen)
     {
+        if (_stopping || _workStops.ContainsKey(0)) return;
         if (Llm is not { } llm) { Notify("没有可用的 CLI LLM：在“管理 › 设置 › AI 摘要”中选择"); return; }
         if (!Approved(skill) && !Confirm(skill, null)) return;
-        Notify($"正在运行「{skill.Label}」…");
-        var g = Store.Begin();
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        _workStops[0] = stop;
+        RunContext? run = null;
+        var group = Store.Begin();
         try
         {
-            if (skill.Grants.Contains("pincc")) Store.Reserve(g);
-            var res = await SkillRun.Run(new SkillRequest
+            run = RunContext.Start(Store, skill, llm, stop.Token);
+            Notify($"正在运行「{skill.Label}」…");
+            if (skill.Grants.Contains("pincc")) Store.Reserve(group);
+            var result = await SkillRun.Run(new SkillRequest
             {
-                Skill = skill, Llm = llm, Store = Store, Desk = Cli.DeskMarkdown(Store, Store.Active()), Group = g.Empty ? null : g.Number,
-            });
-            if (res == null) return;
-            var (_, written) = SkillRun.Apply(Store, g, skill, res, null, (body, grp) => NewCard(s, body, edit: false, group: grp).Card);
-            Store.Release(g);
-            Push(g);
-            Notify(written ? $"「{skill.Label}」完成" : $"「{skill.Label}」：" + FirstLine(res.Text));
+                Skill = skill, Llm = llm, Store = Store, Desk = Cli.DeskMarkdown(Store, Store.Active()),
+                Group = group.Empty ? null : group.Number, Context = run,
+            }, run.Token);
+            run.ThrowIfStopped();
+            if (_stopping || result == null) { run.Complete("stale"); return; }
+            var (_, written) = SkillRun.Apply(Store, group, skill, result, null,
+                newCard: body => PrepareNewCard(screen, body), context: run, committedCard: DisplayCommittedCard);
+            if (_stopping) { run.Complete("success"); return; }
+            Store.Release(group);
+            Push(group);
+            Notify(written ? $"「{skill.Label}」完成" : $"「{skill.Label}」：" + FirstLine(result.Text));
             Relayout(force: true);
+            run.Complete("success");
         }
-        catch (Exception e) { Notify($"「{skill.Label}」失败：" + (e.Message.Length > 120 ? e.Message[..120] + "…" : e.Message)); }
-        finally { Store.Release(g); }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested)
+        {
+            run?.Complete("cancelled");
+            if (!_stopping) Notify("桌面任务已取消");
+        }
+        catch (Exception error)
+        {
+            run?.Complete(error is TimeoutException ? "timeout" : "failed", error.Message);
+            App.Log(error, "desk-skill");
+            if (!_stopping)
+            {
+                try { Notify($"「{skill.Label}」失败：" + FirstLine(error.Message)); }
+                catch (Exception fatal) { ((App)Application.Current).HandleFatal(fatal, "desk-skill-notify"); }
+            }
+        }
+        finally
+        {
+            if (!_stopping) { try { Store.Release(group); } catch (Exception error) { App.Log(error, "desk-skill-release"); } }
+            run?.Dispose();
+            if (_workStops.TryGetValue(0, out var current) && ReferenceEquals(current, stop)) _workStops.Remove(0);
+        }
+    }
+
+    void CancelWork(long id)
+    {
+        if (_stopping || !_workStops.TryGetValue(id, out var stop)) return;
+        try { stop.Cancel(); } catch (ObjectDisposedException) { }
     }
 
     static string FirstLine(string text) => text.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) is { } l ? (l.Length > 80 ? l[..80] + "…" : l) : "";
@@ -1451,9 +1780,10 @@ public sealed class Desk
 
     public ContextMenu CardMenu(CardWindow w)
     {
-        Skills.Refresh(); // a skill file saved a moment ago is in the menu already
+        RefreshConfigurations(); // a skill file saved a moment ago is in the menu already
         var c = w.Card;
         var m = new ContextMenu();
+        if (_workStops.ContainsKey(w.Ref)) Add(m, "", "取消任务", () => CancelWork(w.Ref));
         if (Llm != null && !c.ImageOnly && AskSkill(c) is { } ask)
             Add(m, "", ask.Builtin && ask.Name == "summary" ? string.IsNullOrWhiteSpace(c.Summary) ? "摘要" : "重新摘要" : ask.Label, () => Ask(w));
         if (Llm != null && Skills.For(c).Where(k => k != AskSkill(c)).ToList() is { Count: > 0 } more)
@@ -1498,9 +1828,10 @@ public sealed class Desk
 
     public ContextMenu HubMenu(Screen s)
     {
-        Skills.Refresh();
+        RefreshConfigurations();
         string G(string key) => Store.Setting(key, Hotkeys.Actions.First(a => a.Key == key).Default);
         var m = new ContextMenu();
+        if (_workStops.ContainsKey(0)) Add(m, "", "取消桌面任务", () => CancelWork(0));
         if (HotkeyProblem) Add(m, "", "快捷键冲突 · 去设置", () => OpenManage("settings"));
         Add(m, "", "新建卡片", () => NewCard(s), G("hk.new"));
         Add(m, "", "用剪贴板新建", () => CreateFrom(ClipData.Current(), s), G("hk.paste"));
@@ -1533,7 +1864,7 @@ public sealed class Desk
         m.Items.Add(new Separator());
         Add(m, "", "撤销", Undo, "Ctrl+Z");
         Add(m, "", "管理…", () => OpenManage());
-        Add(m, "", "退出", () => Application.Current.Shutdown());
+        Add(m, "", "退出", () => ((App)Application.Current).RequestExit());
         return m;
     }
 
@@ -1581,6 +1912,8 @@ public sealed class Desk
     /// <summary>A short notice beside the hub of the monitor under the cursor, at a spot no card covers.</summary>
     public void Notify(string text)
     {
+        if (_stopping) return;
+        if (Program.SmokeScenario == "notify-fault") throw new UnauthorizedAccessException("UI smoke notify fault");
         _toast?.Dismiss();
         var s = Screens.UnderCursor();
         var hub = _hubs.FirstOrDefault(h => h.Screen.Id == s.Id)?.Rect ?? new Px(s.Work.Right, s.Work.Bottom, 0, 0);

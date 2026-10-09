@@ -7,6 +7,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Diagnostics;
+using System.Buffers.Binary;
 
 namespace PinCC.Core;
 
@@ -40,9 +42,12 @@ public static partial class Fetch
 {
     public const int MaxText = 22_000;
     const int MaxPage = 2_000_000, MaxImage = 15_000_000, MaxDownload = 25_000_000;
+    internal const int MaxOfficeBytes = 60_000_000, MaxOfficeParts = 256, MaxArchiveEntries = 4096;
+    const int RegexMilliseconds = 2000;
     static readonly TimeSpan PageDeadline = TimeSpan.FromSeconds(15), DownloadDeadline = TimeSpan.FromSeconds(60);
 
     static readonly HttpClient Http = CreateClient(redirect: true), Manual = CreateClient(redirect: false);
+    static readonly SemaphoreSlim FileGate = new(2); // cancelled callers never release the slot of a still blocked reader
     static readonly SemaphoreSlim EdgeGate = new(1); // one headless Edge at a time: they share one profile folder
 
     // Explicit static ctor: guarantees the code-page provider (GBK/Big5/Shift-JIS) is registered before any member runs.
@@ -69,11 +74,11 @@ public static partial class Fetch
     /// every redirect hop with <see cref="SafeToAutoAsync"/> and throws <see cref="UnsafeRedirectException"/> rather
     /// than follow a public link into a private address.
     /// </summary>
-    public static async Task<Page> Web(string url, CancellationToken ct = default, bool auto = false)
+    public static async Task<Page> Web(string url, CancellationToken ct = default, bool auto = false, RunContext? context = null)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(PageDeadline);
-        try { return await WebCore(url, cts, auto).ConfigureAwait(false); }
+        try { return await WebCore(url, cts, auto, context).ConfigureAwait(false); }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new TimeoutException("读取超时"); }
     }
 
@@ -92,8 +97,9 @@ public static partial class Fetch
         }
     }
 
-    static async Task<Page> WebCore(string url, CancellationTokenSource cts, bool auto)
+    static async Task<Page> WebCore(string url, CancellationTokenSource cts, bool auto, RunContext? context)
     {
+        using var httpPhase = context?.Phase("http");
         using var resp = auto ? await GetChecked(url, cts.Token).ConfigureAwait(false)
             : await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
         var finalUrl = resp.RequestMessage?.RequestUri?.ToString() ?? url;
@@ -116,7 +122,12 @@ public static partial class Fetch
             if (ext == null) return ImageExt(bytes) is { } ie ? other with { Image = bytes, ImageExt = ie } : other;
             if (!(ext == ".pdf" ? IsPdf(bytes) : bytes.AsSpan().StartsWith("PK\x03\x04"u8))) return other; // an error page, not the file
             var path = SaveDownload(bytes, ext);
-            var text = ext == ".pdf" ? "" : FileText(path);
+            httpPhase?.Dispose();
+            using var parsePhase = context?.Phase("document_parse");
+            string text;
+            try { text = ext == ".pdf" ? "" : FileText(path, cts.Token); }
+            catch (Exception e) when (e is SourceLimitException or TimeoutException && !cts.IsCancellationRequested)
+            { return other with { Download = path, Desc = e.Message }; }
             return other with { Download = path, Text = text, Desc = Snippet(text) ?? type };
         }
 
@@ -125,19 +136,30 @@ public static partial class Fetch
         if (!html && !plain) return other;
         var (body, truncated) = await ReadCapped(resp, MaxPage, cts.Token).ConfigureAwait(false);
         var decoded = Decode(body, headers.ContentType?.CharSet, html, truncated);
-        if (html) return FromHtml(finalUrl, decoded) with { Type = type };
+        httpPhase?.Dispose();
+        using var htmlPhase = context?.Phase(html ? "html_parse" : "text_decode");
+        if (html) return FromHtml(finalUrl, decoded, cts.Token) with { Type = type };
         var t = Cap(decoded);
         return new Page(finalUrl, name, Snippet(t), site, null, t) { Type = type };
     }
 
     /// <summary>Metadata + main text from an HTML document (also used for the Edge-rendered DOM).</summary>
-    public static Page FromHtml(string url, string html)
+    public static Page FromHtml(string url, string html, CancellationToken ct = default)
     {
-        string? M(string key) => MetaRx().Matches(html).Cast<Match>()
+        try { return FromHtmlCore(url, html, ct); }
+        catch (RegexMatchTimeoutException) { ct.ThrowIfCancellationRequested(); throw new TimeoutException("HTML 解析超过匹配时间上限"); }
+    }
+
+    static Page FromHtmlCore(string url, string html, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (html.Length > MaxPage) throw new SourceLimitException("HTML 超过 2 MB 解析上限");
+        var metadata = MetaRx().Matches(html).Cast<Match>().Take(256).ToArray();
+        string? M(string key) => metadata
             .Where(m => string.Equals(Attr(m.Value, "property") ?? Attr(m.Value, "name") ?? Attr(m.Value, "itemprop"), key, StringComparison.OrdinalIgnoreCase))
             .Select(m => Attr(m.Value, "content")).FirstOrDefault(v => !string.IsNullOrWhiteSpace(v)) is { } v ? Clean(v) : null;
 
-        var ld = JsonLd(html);
+        var ld = JsonLd(html, ct);
         var site = M("og:site_name") ?? ld.Site ?? Host(url);
         var title = M("og:title") ?? M("twitter:title") ?? ld.Title ?? (TitleRx().Match(html) is { Success: true } t ? Clean(t.Groups[1].Value) : null);
         if (title != null && site.Length > 1)
@@ -148,7 +170,8 @@ public static partial class Fetch
         var image = M("og:image") ?? M("og:image:url") ?? M("twitter:image") ?? ld.Image;
         if (image != null && Uri.TryCreate(new Uri(url), image, out var abs)) image = abs.ToString();
 
-        var text = ld.Body is { Length: >= 300 } body ? body : MainText(html);
+        ct.ThrowIfCancellationRequested();
+        var text = ld.Body is { Length: >= 300 } body ? body : MainText(html, ct);
         if (text.Length < 300 && ChallengeRx().IsMatch(title + " " + text)) text = "";
         text = Cap(text);
         return new Page(url, title, desc ?? Snippet(text), site, image, text) { Date = date is { Length: >= 10 } d ? d[..10] : null };
@@ -166,6 +189,7 @@ public static partial class Fetch
             var (bytes, cut) = await ReadCapped(resp, max, cts.Token).ConfigureAwait(false);
             return cut ? null : bytes;
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch { return null; }
     }
 
@@ -229,23 +253,37 @@ public static partial class Fetch
     }
 
     /// <summary>Readable main text: prefer the largest &lt;article&gt;, then &lt;main&gt;, then &lt;body&gt;; drop chrome; keep block breaks.</summary>
-    public static string MainText(string html)
+    public static string MainText(string html, CancellationToken ct = default)
     {
+        try { return MainTextCore(html, ct); }
+        catch (RegexMatchTimeoutException) { ct.ThrowIfCancellationRequested(); throw new TimeoutException("HTML 解析超过匹配时间上限"); }
+    }
+
+    static string MainTextCore(string html, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (html.Length > MaxPage) throw new SourceLimitException("HTML 超过 2 MB 解析上限");
         var s = JunkRx().Replace(html, " ");
-        var known = KnownContainers.Select(sel => Element(s, sel)).FirstOrDefault(x => x is { Length: > 300 });
+        ct.ThrowIfCancellationRequested();
+        var known = KnownContainers.Select(sel => { ct.ThrowIfCancellationRequested(); return Element(s, sel, ct); }).FirstOrDefault(x => x is { Length: > 300 });
         s = ChromeRx().Replace(known ?? s, " ");
+        ct.ThrowIfCancellationRequested();
         // Search / login boxes go, but not a form that wraps the whole page (ASP.NET WebForms does that).
-        s = FormRx().Replace(s, m => WhiteRx().Replace(TagRx().Replace(m.Groups[1].Value, ""), "").Length < 400 ? " " : m.Value);
-        var article = ArticleRx().Matches(s).Cast<Match>().Select(m => m.Groups[1].Value).MaxBy(x => x.Length);
+        s = FormRx().Replace(s, m => { ct.ThrowIfCancellationRequested(); return WhiteRx().Replace(TagRx().Replace(m.Groups[1].Value, ""), "").Length < 400 ? " " : m.Value; });
+        ct.ThrowIfCancellationRequested();
+        var article = ArticleRx().Matches(s).Cast<Match>().Select(m => { ct.ThrowIfCancellationRequested(); return m.Groups[1].Value; }).MaxBy(x => x.Length);
         var main = MainRx().Match(s);
         var body = BodyRx().Match(s);
         s = known ?? (article is { Length: > 500 } ? article : main.Success ? main.Groups[1].Value : body.Success ? body.Groups[1].Value : s);
-        s = HeadingTagRx().Replace(s, m => "\n\n" + new string('#', m.Groups[1].Value[0] - '0') + " ");
+        ct.ThrowIfCancellationRequested();
+        s = HeadingTagRx().Replace(s, m => { ct.ThrowIfCancellationRequested(); return "\n\n" + new string('#', m.Groups[1].Value[0] - '0') + " "; });
         s = LiTagRx().Replace(s, "\n- ");
         s = BlockTagRx().Replace(s, "\n");
+        ct.ThrowIfCancellationRequested();
         s = TagRx().Replace(s, "");
+        ct.ThrowIfCancellationRequested();
         s = WebUtility.HtmlDecode(s);
-        var lines = s.Split('\n').Select(l => SpaceRx().Replace(l, " ").Trim()).Where(l => l.Length > 0 && l != "-");
+        var lines = s.Split('\n').Select(l => { ct.ThrowIfCancellationRequested(); return SpaceRx().Replace(l, " ").Trim(); }).Where(l => l.Length > 0 && l != "-");
         return BlankRx().Replace(string.Join("\n", lines), "\n\n").Trim();
     }
 
@@ -331,9 +369,38 @@ public static partial class Fetch
 
     // ================= local files =================
 
-    /// <summary>Facts about a local file or folder plus its readable text (empty when the format is not readable here).</summary>
-    public static (CardMeta Meta, string Text) File(string path)
+    public static Task<(CardMeta Meta, string Text)> FileAsync(string path, CancellationToken ct = default, RunContext? context = null) =>
+        FileWorker(token => File(path, token, context), ct, context);
+
+    // WaitAsync bounds the caller even if a synchronous network-file read is blocked inside the OS.
+    // The worker retains its slot until it actually exits, so repeated cancelled requests cannot create unbounded threads.
+    internal static async Task<T> FileWorker<T>(Func<CancellationToken, T> read, CancellationToken ct = default, RunContext? context = null)
     {
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        stop.CancelAfter(TimeSpan.FromSeconds(15));
+        try
+        {
+            using (context?.Phase("file_queue"))
+                await FileGate.WaitAsync(stop.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new TimeoutException("等待文件读取超过 15 秒"); }
+        var token = stop.Token;
+        var work = Task.Run(() =>
+        {
+            try { token.ThrowIfCancellationRequested(); return read(token); }
+            finally { FileGate.Release(); }
+        });
+        _ = work.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        try { return await work.WaitAsync(stop.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new TimeoutException("文件读取超过 15 秒"); }
+    }
+
+    /// <summary>Facts about a local file or folder plus its readable text (empty when the format is not readable here).</summary>
+    public static (CardMeta Meta, string Text) File(string path, CancellationToken ct = default, RunContext? context = null)
+    {
+        ct.ThrowIfCancellationRequested();
+        using var phase = context?.Phase("file_parse");
         var meta = new CardMeta { Src = path, Title = Path.GetFileName(path.TrimEnd('\\', '/')) };
         string text = "";
         try
@@ -341,7 +408,7 @@ public static partial class Fetch
             if (Directory.Exists(path))
             {
                 meta.FType = "文件夹";
-                var items = Directory.EnumerateFileSystemEntries(path).Take(40).Select(Path.GetFileName).ToList();
+                var items = Directory.EnumerateFileSystemEntries(path).Take(40).Select(p => { ct.ThrowIfCancellationRequested(); return Path.GetFileName(p); }).ToList();
                 text = string.Join("\n", items);
                 meta.Desc = $"{items.Count}{(items.Count == 40 ? "+" : "")} 项：" + string.Join("、", items.Take(8));
             }
@@ -351,40 +418,75 @@ public static partial class Fetch
                 meta.FType = f.Extension.TrimStart('.').ToUpperInvariant();
                 meta.Size = f.Length;
                 meta.Mtime = new DateTimeOffset(f.LastWriteTimeUtc).ToUnixTimeMilliseconds();
-                text = FileText(path);
+                text = FileText(path, ct);
                 if (text.Length > 0) meta.Desc = SpaceRx().Replace(text.Length > 300 ? text[..300] : text, " ").Trim();
             }
             else meta.State = "missing";
         }
-        catch (Exception e) { meta.Error = e.Message; }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception e) { ct.ThrowIfCancellationRequested(); meta.Error = e.Message; }
         return (meta, text);
     }
 
     /// <summary>Plain text of a local document we can read without extra libraries; "" when unsupported.</summary>
-    public static string FileText(string path)
+    public static string FileText(string path, CancellationToken ct = default)
     {
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        stop.CancelAfter(TimeSpan.FromSeconds(15));
+        var token = stop.Token;
         try
         {
+            token.ThrowIfCancellationRequested();
             var ext = Path.GetExtension(path).ToLowerInvariant();
-            if (ext is ".docx" or ".pptx" or ".xlsx") return Cap(OfficeText(path, ext));
+            if (ext is ".docx" or ".pptx" or ".xlsx") return Cap(OfficeText(path, ext, token));
             using var fs = OpenShared(path);
-            if (fs.Length > 20_000_000) return "";
-            var bytes = new byte[fs.Length];
-            bytes = bytes[..fs.ReadAtLeast(bytes, bytes.Length, throwOnEndOfStream: false)];
-            if (ext is ".html" or ".htm") return Cap(MainText(Decode(bytes, null, true)));
+            long length = fs.Length;
+            if (length > 20_000_000) throw new SourceLimitException("文本文件超过 20 MB 读取上限");
+            var bytes = new byte[length];
+            int read = 0;
+            while (read < bytes.Length)
+            {
+                token.ThrowIfCancellationRequested();
+                int n = fs.Read(bytes, read, Math.Min(65536, bytes.Length - read));
+                if (n == 0) break;
+                read += n;
+            }
+            bytes = bytes[..read];
+            token.ThrowIfCancellationRequested();
+            if (ext is ".html" or ".htm") return Cap(MainText(Decode(bytes, null, true), token));
             if (bytes.AsSpan(0, Math.Min(bytes.Length, 8000)).Contains((byte)0) && !(bytes.Length > 1 && bytes[0] == 0xFF && bytes[1] == 0xFE))
                 return ""; // binary (pdf, images, archives…) — left to the LLM tool / the default app
             return Cap(Text(bytes));
         }
-        catch { return ""; }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new TimeoutException("文件解析超过 15 秒"); }
+        catch (OperationCanceledException) { throw; }
+        catch (SourceLimitException) { throw; }
+        catch (RegexMatchTimeoutException) { throw new TimeoutException("HTML 解析超过匹配时间上限"); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException) { return ""; }
     }
 
     /// <summary>Read access that still works while Word / Excel / a sync client holds the file open for writing.</summary>
     static FileStream OpenShared(string path) => new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 
-    static string OfficeText(string path, string ext)
+    static string OfficeText(string path, string ext, CancellationToken ct)
     {
-        using var zip = new ZipArchive(OpenShared(path), ZipArchiveMode.Read);
+        using var file = OpenShared(path);
+        long length = file.Length;
+        if (length > MaxDownload) throw new SourceLimitException("Office 文件超过 25 MB 读取上限");
+        var snapshot = new byte[length];
+        int copied = 0;
+        while (copied < snapshot.Length)
+        {
+            ct.ThrowIfCancellationRequested();
+            int n = file.Read(snapshot, copied, Math.Min(65536, snapshot.Length - copied));
+            if (n == 0) throw new InvalidDataException("Office 文件在读取时改变");
+            copied += n;
+        }
+        using var archive = new MemoryStream(snapshot, writable: false);
+        CheckZipDirectory(archive, ct);
+        archive.Position = 0;
+        using var zip = new ZipArchive(archive, ZipArchiveMode.Read);
+        if (zip.Entries.Count > MaxArchiveEntries) throw new SourceLimitException("Office 压缩包条目过多");
         IEnumerable<ZipArchiveEntry> parts = ext switch
         {
             ".docx" => zip.Entries.Where(e => e.FullName == "word/document.xml"),
@@ -392,16 +494,129 @@ public static partial class Fetch
                                   .OrderBy(e => int.TryParse(Regex.Match(e.FullName, @"\d+").Value, out var n) ? n : 0),
             _ => zip.Entries.Where(e => e.FullName == "xl/sharedStrings.xml"),
         };
-        var sb = new StringBuilder();
-        foreach (var e in parts.Where(e => e.Length < 60_000_000)) // a zip bomb must not take the process down
+        var selected = parts.ToArray();
+        if (selected.Length > MaxOfficeParts) throw new SourceLimitException("Office 文本条目超过 256 个上限");
+        long declared = 0;
+        foreach (var part in selected)
         {
-            using var r = new StreamReader(e.Open());
-            var xml = r.ReadToEnd();
-            xml = Regex.Replace(xml, @"</(w:p|a:p|si)>", "\n");
-            xml = Regex.Replace(xml, @"<w:tab/>", "\t");
-            sb.Append(WebUtility.HtmlDecode(TagRx().Replace(xml, ""))).Append('\n');
+            ct.ThrowIfCancellationRequested();
+            if (part.Length > MaxOfficeBytes - declared) throw new SourceLimitException("Office XML 超过累计 60 MB 上限");
+            declared += part.Length;
         }
-        return BlankRx().Replace(sb.ToString(), "\n\n").Trim();
+        var sb = new StringBuilder();
+        long expanded = 0;
+        int count = 0;
+        foreach (var e in selected)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (++count > MaxOfficeParts || e.Length > MaxOfficeBytes - expanded)
+                throw new SourceLimitException("Office XML 超过累计 60 MB 或 256 个文本条目上限");
+            using var stream = new LimitedStream(e.Open(), n =>
+            {
+                expanded += n;
+                if (expanded > MaxOfficeBytes) throw new SourceLimitException("Office 解压内容超过累计 60 MB 上限");
+            }, ct);
+            using var reader = new StreamReader(stream);
+            var buffer = new char[8192];
+            var tag = new StringBuilder();
+            bool inTag = false;
+            for (int n; (n = reader.Read(buffer, 0, buffer.Length)) > 0;)
+            {
+                ct.ThrowIfCancellationRequested();
+                var text = new StringBuilder();
+                for (int i = 0; i < n; i++)
+                {
+                    char ch = buffer[i];
+                    if (!inTag && ch == '<') { inTag = true; tag.Clear(); }
+                    else if (inTag && ch == '>')
+                    {
+                        var value = tag.ToString();
+                        if (value is "/w:p" or "/a:p" or "/si") text.Append('\n');
+                        else if (value is "w:tab/" or "w:tab /") text.Append('\t');
+                        inTag = false;
+                    }
+                    else if (inTag)
+                    {
+                        if (tag.Length >= 4096) throw new SourceLimitException("Office XML 标签过长");
+                        tag.Append(ch);
+                    }
+                    else text.Append(ch);
+                }
+                sb.Append(text);
+                if (sb.Length > MaxText * 2) { sb.Remove(18_000, sb.Length - 22_000); sb.Insert(18_000, "\n…\n"); }
+            }
+            sb.Append('\n');
+        }
+        ct.ThrowIfCancellationRequested();
+        return BlankRx().Replace(WebUtility.HtmlDecode(sb.ToString()), "\n\n").Trim();
+    }
+
+    // Check central directory limits before ZipArchive allocates an object/name for every entry.
+    static void CheckZipDirectory(Stream file, CancellationToken ct)
+    {
+        if (file.Length < 22) throw new InvalidDataException("Office ZIP 不完整");
+        var tail = new byte[(int)Math.Min(file.Length, 65557)];
+        file.Position = file.Length - tail.Length;
+        file.ReadExactly(tail);
+        int end = -1;
+        for (int i = tail.Length - 22; i >= 0; i--)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(i, 4)) == 0x06054b50
+                && i + 22 + BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(i + 20, 2)) == tail.Length) { end = i; break; }
+        }
+        if (end < 0) throw new InvalidDataException("Office ZIP 缺少目录结尾");
+        var eocd = tail.AsSpan(end);
+        ushort entries = BinaryPrimitives.ReadUInt16LittleEndian(eocd[10..]);
+        uint bytes = BinaryPrimitives.ReadUInt32LittleEndian(eocd[12..]), offset = BinaryPrimitives.ReadUInt32LittleEndian(eocd[16..]);
+        if (entries == ushort.MaxValue || bytes == uint.MaxValue || offset == uint.MaxValue)
+            throw new SourceLimitException("Office ZIP64 超出本地解析范围");
+        if (entries > MaxArchiveEntries || bytes > 4_000_000) throw new SourceLimitException("Office ZIP 目录超过 4096 条目或 4 MB 上限");
+        if (BinaryPrimitives.ReadUInt16LittleEndian(eocd[4..]) != 0 || BinaryPrimitives.ReadUInt16LittleEndian(eocd[6..]) != 0)
+            throw new InvalidDataException("不支持分卷 Office ZIP");
+        long directoryEnd = (long)offset + bytes;
+        if (directoryEnd > file.Length - tail.Length + end) throw new InvalidDataException("Office ZIP 目录越界");
+        file.Position = offset;
+        var header = new byte[46];
+        int actual = 0;
+        while (file.Position < directoryEnd)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (++actual > MaxArchiveEntries) throw new SourceLimitException("Office ZIP 目录超过 4096 条目上限");
+            if (directoryEnd - file.Position < header.Length) throw new InvalidDataException("Office ZIP 目录不完整");
+            file.ReadExactly(header);
+            if (BinaryPrimitives.ReadUInt32LittleEndian(header) != 0x02014b50) throw new InvalidDataException("Office ZIP 目录无效");
+            int name = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(28, 2));
+            int extra = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(30, 2));
+            int comment = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(32, 2));
+            if (name > 4096) throw new SourceLimitException("Office ZIP 文件名过长");
+            long next = file.Position + name + extra + comment;
+            if (next > directoryEnd) throw new InvalidDataException("Office ZIP 目录条目越界");
+            file.Position = next;
+        }
+        if (actual != entries) throw new InvalidDataException("Office ZIP 目录数量不一致");
+    }
+
+    sealed class LimitedStream(Stream source, Action<int> consume, CancellationToken ct) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            ct.ThrowIfCancellationRequested();
+            int n = source.Read(buffer, offset, count);
+            ct.ThrowIfCancellationRequested();
+            consume(n);
+            return n;
+        }
+        protected override void Dispose(bool disposing) { if (disposing) source.Dispose(); base.Dispose(disposing); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     // ================= downloads =================
@@ -463,15 +678,16 @@ public static partial class Fetch
     static readonly string[] KnownContainers = { "js_content", "RichText", "article_content", "markdown-body", "article-content", "post-content", "entry-content", "rich_media_content" };
 
     /// <summary>Inner HTML of the first element whose id or class contains <paramref name="token"/> (balanced by tag name).</summary>
-    static string? Element(string html, string token)
+    static string? Element(string html, string token, CancellationToken ct)
     {
-        var open = Regex.Match(html, $@"<(\w+)\b[^>]*\b(?:id|class)\s*=\s*[""'][^""']*\b{Regex.Escape(token)}\b[^""']*[""'][^>]*>", RegexOptions.IgnoreCase);
+        var open = Regex.Match(html, $@"<(\w+)\b[^>]*\b(?:id|class)\s*=\s*[""'][^""']*\b{Regex.Escape(token)}\b[^""']*[""'][^>]*>", RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(RegexMilliseconds));
         if (!open.Success) return null;
         var tag = open.Groups[1].Value;
-        var rx = new Regex($@"<(/?){tag}\b[^>]*>", RegexOptions.IgnoreCase);
+        var rx = new Regex($@"<(/?){tag}\b[^>]*>", RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(RegexMilliseconds));
         int depth = 1, start = open.Index + open.Length;
         for (var m = rx.Match(html, start); m.Success; m = m.NextMatch())
         {
+            ct.ThrowIfCancellationRequested();
             depth += m.Groups[1].Value == "/" ? -1 : m.Value.EndsWith("/>") ? 0 : 1;
             if (depth == 0) return html[start..m.Index];
         }
@@ -479,18 +695,24 @@ public static partial class Fetch
     }
 
     /// <summary>schema.org JSON-LD: headline, description, image, publisher and articleBody (handles @graph and arrays).</summary>
-    static (string? Title, string? Desc, string? Image, string? Site, string? Body) JsonLd(string html)
+    static (string? Title, string? Desc, string? Image, string? Site, string? Body) JsonLd(string html, CancellationToken ct)
     {
         string? title = null, desc = null, image = null, site = null, body = null;
+        int blocks = 0;
         foreach (Match m in JsonLdRx().Matches(html))
         {
+            ct.ThrowIfCancellationRequested();
+            if (++blocks > 64) throw new SourceLimitException("HTML 的 JSON-LD 块过多");
             try
             {
                 using var doc = JsonDocument.Parse(m.Groups[1].Value.Trim());
                 var stack = new Stack<JsonElement>();
                 stack.Push(doc.RootElement);
+                int nodes = 0;
                 while (stack.Count > 0)
                 {
+                    ct.ThrowIfCancellationRequested();
+                    if (++nodes > 4096 || stack.Count > 4096) throw new SourceLimitException("JSON-LD 节点过多");
                     var e = stack.Pop();
                     if (e.ValueKind == JsonValueKind.Array) { foreach (var x in e.EnumerateArray().Reverse()) stack.Push(x); continue; } // document order
                     if (e.ValueKind != JsonValueKind.Object) continue;
@@ -520,20 +742,24 @@ public static partial class Fetch
     /// JS-rendered pages: let the Edge that ships with Windows render the page headlessly and dump the DOM
     /// (separate profile so it never hands the URL to the user's running browser). Null when unavailable.
     /// </summary>
-    public static async Task<Page?> Rendered(string url, CancellationToken ct = default)
+    public static async Task<Page?> Rendered(string url, CancellationToken ct = default, RunContext? context = null)
     {
         var edge = EdgePath();
         if (edge == null || !Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")) return null;
         var profile = Path.Combine(Store.DefaultHome, "edge");
         string[] args = ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--mute-audio", "--disable-extensions",
                          $"--user-data-dir={profile}", "--virtual-time-budget=8000", "--dump-dom", uri.AbsoluteUri];
-        await EdgeGate.WaitAsync(ct).ConfigureAwait(false);
+        using var queueStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        queueStop.CancelAfter(TimeSpan.FromSeconds(25));
+        try { using var phase = context?.Phase("edge_queue"); await EdgeGate.WaitAsync(queueStop.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return null; }
         Proc.Result r;
-        try { r = await Proc.Run(edge, args, null, TimeSpan.FromSeconds(25), ct, maxOutput: MaxPage).ConfigureAwait(false); }
+        try { using var phase = context?.Phase("edge"); r = await Proc.Run(edge, args, null, TimeSpan.FromSeconds(25), ct, maxOutput: MaxPage).ConfigureAwait(false); }
         catch (Exception e) when (e is TimeoutException or InvalidOperationException or System.ComponentModel.Win32Exception) { return null; }
         finally { EdgeGate.Release(); }
         if (r.Out.Length < 200) return null;
-        return await Task.Run(() => FromHtml(uri.AbsoluteUri, r.Out), ct).ConfigureAwait(false); // regex work stays off the UI thread
+        using var parsed = context?.Phase("html_parse");
+        return await Task.Run(() => FromHtml(uri.AbsoluteUri, r.Out, ct), ct).ConfigureAwait(false); // regex work stays off the UI thread
     }
 
     static string? EdgePath()
@@ -567,28 +793,28 @@ public static partial class Fetch
 
     static string? Attr(string tag, string name)
     {
-        var m = Regex.Match(tag, $@"\b{name}\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s>]+))", RegexOptions.IgnoreCase);
+        var m = Regex.Match(tag, $@"\b{name}\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s>]+))", RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(RegexMilliseconds));
         return !m.Success ? null : m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Value;
     }
 
-    [GeneratedRegex(@"<meta\b[^>]*>", RegexOptions.IgnoreCase)] private static partial Regex MetaRx();
-    [GeneratedRegex(@"token|sig|credential|secret|key|auth|code|otp|ticket|session|password|pwd", RegexOptions.IgnoreCase)] private static partial Regex SecretNameRx();
-    [GeneratedRegex(@"keywords?|author", RegexOptions.IgnoreCase)] private static partial Regex BenignNameRx(); // search / blog params, not secrets
-    [GeneratedRegex(@"<script[^>]+application/ld\+json[^>]*>([\s\S]*?)</script>", RegexOptions.IgnoreCase)] private static partial Regex JsonLdRx();
-    [GeneratedRegex(@"just a moment|attention required|captcha|verify you are human|请完成安全验证|访问验证|人机验证|enable javascript", RegexOptions.IgnoreCase)] private static partial Regex ChallengeRx();
-    [GeneratedRegex(@"<title[^>]*>([\s\S]*?)</title>", RegexOptions.IgnoreCase)] private static partial Regex TitleRx();
-    [GeneratedRegex(@"<meta[^>]+charset\s*=\s*[""']?\s*([\w-]+)", RegexOptions.IgnoreCase)] private static partial Regex CharsetRx();
-    [GeneratedRegex(@"<!--[\s\S]*?-->|<(script|style|noscript|svg|template|iframe|canvas|head|select|button)\b[\s\S]*?</\1\s*>", RegexOptions.IgnoreCase)] private static partial Regex JunkRx();
-    [GeneratedRegex(@"<(nav|header|footer|aside|menu|dialog)\b[\s\S]*?</\1\s*>", RegexOptions.IgnoreCase)] private static partial Regex ChromeRx();
-    [GeneratedRegex(@"<form\b[^>]*>([\s\S]*?)</form\s*>", RegexOptions.IgnoreCase)] private static partial Regex FormRx();
-    [GeneratedRegex(@"<article\b[^>]*>([\s\S]*?)</article\s*>", RegexOptions.IgnoreCase)] private static partial Regex ArticleRx();
-    [GeneratedRegex(@"<main\b[^>]*>([\s\S]*?)</main\s*>", RegexOptions.IgnoreCase)] private static partial Regex MainRx();
-    [GeneratedRegex(@"<body\b[^>]*>([\s\S]*?)(?:</body\s*>|$)", RegexOptions.IgnoreCase)] private static partial Regex BodyRx();
-    [GeneratedRegex(@"<h([1-6])\b[^>]*>", RegexOptions.IgnoreCase)] private static partial Regex HeadingTagRx();
-    [GeneratedRegex(@"<li\b[^>]*>", RegexOptions.IgnoreCase)] private static partial Regex LiTagRx();
-    [GeneratedRegex(@"<(br|/p|/div|/h[1-6]|/li|/tr|/section|/blockquote|/pre|/table|/ul|/ol|/dd|/dt)\b[^>]*>|<(p|div|tr|pre|blockquote|section)\b[^>]*>", RegexOptions.IgnoreCase)] private static partial Regex BlockTagRx();
-    [GeneratedRegex(@"<[^>]+>")] private static partial Regex TagRx();
-    [GeneratedRegex(@"[ \t\u00A0\u3000]+")] private static partial Regex SpaceRx();
-    [GeneratedRegex(@"\s+")] private static partial Regex WhiteRx();
-    [GeneratedRegex(@"\n{3,}")] private static partial Regex BlankRx();
+    [GeneratedRegex(@"<meta\b[^>]*>", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex MetaRx();
+    [GeneratedRegex(@"token|sig|credential|secret|key|auth|code|otp|ticket|session|password|pwd", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex SecretNameRx();
+    [GeneratedRegex(@"keywords?|author", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex BenignNameRx(); // search / blog params, not secrets
+    [GeneratedRegex(@"<script[^>]+application/ld\+json[^>]*>([\s\S]*?)</script>", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex JsonLdRx();
+    [GeneratedRegex(@"just a moment|attention required|captcha|verify you are human|请完成安全验证|访问验证|人机验证|enable javascript", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex ChallengeRx();
+    [GeneratedRegex(@"<title[^>]*>([\s\S]*?)</title>", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex TitleRx();
+    [GeneratedRegex(@"<meta[^>]+charset\s*=\s*[""']?\s*([\w-]+)", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex CharsetRx();
+    [GeneratedRegex(@"<!--[\s\S]*?-->|<(script|style|noscript|svg|template|iframe|canvas|head|select|button)\b[\s\S]*?</\1\s*>", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex JunkRx();
+    [GeneratedRegex(@"<(nav|header|footer|aside|menu|dialog)\b[\s\S]*?</\1\s*>", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex ChromeRx();
+    [GeneratedRegex(@"<form\b[^>]*>([\s\S]*?)</form\s*>", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex FormRx();
+    [GeneratedRegex(@"<article\b[^>]*>([\s\S]*?)</article\s*>", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex ArticleRx();
+    [GeneratedRegex(@"<main\b[^>]*>([\s\S]*?)</main\s*>", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex MainRx();
+    [GeneratedRegex(@"<body\b[^>]*>([\s\S]*?)(?:</body\s*>|$)", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex BodyRx();
+    [GeneratedRegex(@"<h([1-6])\b[^>]*>", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex HeadingTagRx();
+    [GeneratedRegex(@"<li\b[^>]*>", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex LiTagRx();
+    [GeneratedRegex(@"<(br|/p|/div|/h[1-6]|/li|/tr|/section|/blockquote|/pre|/table|/ul|/ol|/dd|/dt)\b[^>]*>|<(p|div|tr|pre|blockquote|section)\b[^>]*>", RegexOptions.IgnoreCase, RegexMilliseconds)] private static partial Regex BlockTagRx();
+    [GeneratedRegex(@"<[^>]+>", RegexOptions.None, RegexMilliseconds)] private static partial Regex TagRx();
+    [GeneratedRegex(@"[ \t\u00A0\u3000]+", RegexOptions.None, RegexMilliseconds)] private static partial Regex SpaceRx();
+    [GeneratedRegex(@"\s+", RegexOptions.None, RegexMilliseconds)] private static partial Regex WhiteRx();
+    [GeneratedRegex(@"\n{3,}", RegexOptions.None, RegexMilliseconds)] private static partial Regex BlankRx();
 }

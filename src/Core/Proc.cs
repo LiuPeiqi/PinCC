@@ -12,7 +12,25 @@ public static class Proc
 {
     public sealed record Result(int Code, string Out, string Err);
 
-    static readonly Lazy<IntPtr> Job = new(CreateJob);
+    // A separate job per run permits cancelling one tree without affecting another model.
+    sealed class ChildJob : IDisposable
+    {
+        IntPtr _handle;
+        public ChildJob(Process process)
+        {
+            try
+            {
+                _handle = CreateJob();
+                if (_handle != IntPtr.Zero && !AssignProcessToJobObject(_handle, process.Handle)) Dispose();
+            }
+            catch { Dispose(); }
+        }
+        public void Dispose()
+        {
+            var handle = Interlocked.Exchange(ref _handle, IntPtr.Zero);
+            if (handle != IntPtr.Zero) CloseHandle(handle);
+        }
+    }
 
     /// <param name="rawArgs">Exact command line (cmd.exe needs its own quoting); otherwise <paramref name="args"/> are quoted per token.</param>
     /// <param name="maxOutput">Bytes of stdout kept; the rest is drained and dropped so the child never blocks on a full pipe.</param>
@@ -37,8 +55,10 @@ public static class Proc
         else foreach (var a in args) psi.ArgumentList.Add(a);
         if (env != null) foreach (var (k, v) in env) psi.Environment[k] = v;
 
+        ct.ThrowIfCancellationRequested();
+        if (cts.IsCancellationRequested) throw new TimeoutException($"超过 {timeout.TotalSeconds:0} 秒未完成");
         using var p = Process.Start(psi) ?? throw new InvalidOperationException("无法启动 " + file);
-        try { AssignProcessToJobObject(Job.Value, p.Handle); } catch { /* job unavailable: the deadline still applies */ }
+        using var job = new ChildJob(p);
         var output = new Sink(p.StandardOutput.BaseStream, maxOutput);
         var error = new Sink(p.StandardError.BaseStream, 1_000_000);
         if (stdin != null)
@@ -56,11 +76,15 @@ public static class Proc
         catch (OperationCanceledException)
         {
             try { p.Kill(entireProcessTree: true); } catch { }
+            job.Dispose();
+            await Task.WhenAny(p.WaitForExitAsync(), Task.Delay(2000)).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             throw new TimeoutException($"超过 {timeout.TotalSeconds:0} 秒未完成");
         }
         // A grandchild that inherited the pipes can hold them open after the child exits: take what arrived.
-        await Task.WhenAny(Task.WhenAll(output.Done, error.Done), Task.Delay(3000, CancellationToken.None)).ConfigureAwait(false);
+        await Task.WhenAny(Task.WhenAll(output.Done, error.Done), Task.Delay(3000, cts.Token)).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        if (cts.IsCancellationRequested) throw new TimeoutException($"超过 {timeout.TotalSeconds:0} 秒未完成");
         return new Result(p.ExitCode, output.Text(), error.Text());
     }
 
@@ -96,16 +120,17 @@ public static class Proc
     static IntPtr CreateJob()
     {
         var job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) return IntPtr.Zero;
         var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION { BasicLimitInformation = { LimitFlags = 0x2000 } }; // KILL_ON_JOB_CLOSE
         int size = Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
         var ptr = Marshal.AllocHGlobal(size);
         try
         {
             Marshal.StructureToPtr(info, ptr, false);
-            SetInformationJobObject(job, 9, ptr, (uint)size); // JobObjectExtendedLimitInformation
+            if (!SetInformationJobObject(job, 9, ptr, (uint)size)) { CloseHandle(job); return IntPtr.Zero; }
         }
         finally { Marshal.FreeHGlobal(ptr); }
-        return job; // intentionally never closed: the handle closes when PinCC exits, killing the children
+        return job; // Closing this handle, including during PinCC exit, kills the associated tree.
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -133,4 +158,5 @@ public static class Proc
     [DllImport("kernel32", CharSet = CharSet.Unicode)] static extern IntPtr CreateJobObject(IntPtr attrs, string? name);
     [DllImport("kernel32")] static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length);
     [DllImport("kernel32")] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32")] static extern bool CloseHandle(IntPtr handle);
 }

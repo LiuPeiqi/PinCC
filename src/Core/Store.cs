@@ -140,17 +140,38 @@ public sealed partial class Store : IDisposable
     public Card Insert(Group g, Card c)
     {
         Writable();
+        return InTx(g, () => InsertRow(g, c));
+    }
+
+    Card InsertRow(Group g, Card card)
+    {
         var now = When.NowMs;
-        if (c.CreatedAt == 0) c.CreatedAt = now;
-        c.UpdatedAt = now;
-        c.Rev = 1;
-        InTx(g, () =>
+        if (card.CreatedAt == 0) card.CreatedAt = now;
+        card.UpdatedAt = now;
+        card.Rev = 1;
+        card.Id = Db.Insert($"INSERT INTO cards(rev,updated_at,{string.Join(",", Card.Columns)}) VALUES(1,?,{Marks(Card.Columns.Length)})", [now, .. card.Values()]);
+        Journal(g, card.Id, 0, 1, "create", null, []);
+        return card;
+    }
+
+    /// <summary>Checks the source and commits a multi-card result together; presentation happens after commit.</summary>
+    public List<Card> InsertMany(Group group, IReadOnlyList<Card> cards, Func<bool>? canApply = null, CancellationToken ct = default)
+    {
+        Writable();
+        var pending = cards.Select(card => card.Clone()).ToList();
+        return InTx(group, () =>
         {
-            c.Id = Db.Insert($"INSERT INTO cards(rev,updated_at,{string.Join(",", Card.Columns)}) VALUES(1,?,{Marks(Card.Columns.Length)})", [now, .. c.Values()]);
-            Journal(g, c.Id, 0, 1, "create", null, []);
-            return 0;
+            ct.ThrowIfCancellationRequested();
+            if (canApply != null && !canApply()) return [];
+            var saved = new List<Card>();
+            foreach (var card in pending)
+            {
+                ct.ThrowIfCancellationRequested();
+                saved.Add(InsertRow(group, card));
+            }
+            ct.ThrowIfCancellationRequested();
+            return saved;
         });
-        return c;
     }
 
     /// <summary>
@@ -220,6 +241,7 @@ public sealed partial class Store : IDisposable
     /// <summary>A transaction that also rolls back the group's bookkeeping, so a failed write leaves no phantom entry.</summary>
     T InTx<T>(Group g, Func<T> body)
     {
+        using var images = HomeLease.EnterImages(Home);
         var (id, cards) = (g.Id, new Dictionary<long, (long, long, string)>(g.Cards));
         try { return Db.Tx(body); }
         catch { g.Id = id; g.Cards = cards; throw; }
@@ -296,38 +318,115 @@ public sealed partial class Store : IDisposable
         });
     }
 
+    /// <summary>Idempotent emergency save: the draft key and its card commit together, without any UI work.</summary>
+    public Card SaveRecovery(string key, Card snapshot, long? expectedRev, long? groupNumber = null) =>
+        SaveRecovery(key, snapshot, expectedRev, groupNumber, out _);
+
+    public Card SaveRecovery(string key, Card snapshot, long? expectedRev, long? groupNumber, out long savedGroup)
+    {
+        Writable();
+        if (string.IsNullOrWhiteSpace(key)) throw new ArgumentException("恢复草稿缺少编号", nameof(key));
+        var group = Begin();
+        var result = InTx(group, () =>
+        {
+            if (long.TryParse(Setting("recovery." + key), out var savedId))
+            {
+                var card = Get(savedId) ?? throw new KeyNotFoundException("已恢复的卡片已被删除，草稿保持不变");
+                long.TryParse(Setting("recovery-group." + key), out var retryGroup);
+                return (Card: card, Group: retryGroup);
+            }
+            // Rejoin only the recorded session for this card; stale or unrelated draft metadata cannot merge groups.
+            if (snapshot.Id > 0 && groupNumber is > 0 && Convert.ToInt64(Db.Scalar(
+                "SELECT EXISTS(SELECT 1 FROM ops WHERE grp=? AND card_id=? AND op IN ('edit','create'))", groupNumber.Value, snapshot.Id)) != 0)
+                group.Id = groupNumber.Value;
+            Card saved;
+            if (snapshot.Id > 0)
+            {
+                var current = Get(snapshot.Id) ?? throw new KeyNotFoundException("草稿对应的卡片已不存在");
+                if (expectedRev != null && current.Rev != expectedRev && current.Body != snapshot.Body)
+                    throw new RevConflictException(current.Rev);
+                var next = current.Clone();
+                next.Body = snapshot.Body;
+                saved = Write(group, current, next, "edit", journal: true);
+            }
+            else
+            {
+                saved = InsertRow(group, snapshot.Clone());
+            }
+            SetSetting("recovery." + key, saved.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            SetSetting("recovery-group." + key, group.Number.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            return (Card: saved, Group: group.Number);
+        });
+        savedGroup = result.Group;
+        return result.Card;
+    }
+
     /// <summary>
     /// Drops history and deleted cards older than <paramref name="days"/> (done cards are kept as the archive), then
     /// images that nothing — no card, no journaled snapshot — references any more.
     /// </summary>
-    public void Purge(int days)
+    public void Purge(int days, CancellationToken ct = default)
     {
         if (ReadOnly) return;
+        ct.ThrowIfCancellationRequested();
         var cutoff = When.NowMs - (long)days * 86_400_000;
-        Db.Tx(() =>
+        Db.WithBudget(() => Db.Tx(() =>
         {
-            Db.Exec("DELETE FROM ops WHERE at < ?", cutoff);
-            Db.Exec("DELETE FROM cards WHERE deleted_at IS NOT NULL AND deleted_at < ?", cutoff);
-        });
-        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in Db.Query("SELECT ifnull(images,'') || body AS t FROM cards UNION ALL SELECT ifnull(before,'') FROM ops"))
-            foreach (Match m in ImgRefRx().Matches((string?)r["t"] ?? "")) used.Add(m.Groups[1].Value);
+            Db.Exec("DELETE FROM ops WHERE id IN (SELECT id FROM ops WHERE at < ? LIMIT 2000)", cutoff);
+            Db.Exec("DELETE FROM cards WHERE id IN (SELECT id FROM cards WHERE deleted_at IS NOT NULL AND deleted_at < ? LIMIT 2000)", cutoff);
+            return 0;
+        }), ct, TimeSpan.FromSeconds(2));
         var old = DateTime.UtcNow.AddDays(-Math.Max(1, days));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         foreach (var f in Directory.EnumerateFiles(ImgDir))
-            if (!used.Contains(Path.GetFileName(f)) && File.GetLastWriteTimeUtc(f) < old)
-                try { File.Delete(f); } catch { /* in use: next time */ }
+        {
+            ct.ThrowIfCancellationRequested();
+            if (clock.Elapsed > TimeSpan.FromSeconds(2)) break; // bounded work; remaining garbage can wait
+            if (File.GetLastWriteTimeUtc(f) >= old) continue;
+            // Recheck references while writers are excluded; never scan directories on the GUI connection.
+            using var images = HomeLease.TryEnter(Home, "Images");
+            if (images == null) break;
+            if (File.GetLastWriteTimeUtc(f) >= old) continue; // SaveImage may have renewed it since the scan
+            var name = Path.GetFileName(f);
+            bool used;
+            try
+            {
+                used = Db.WithBudget(() => Convert.ToInt64(Db.Scalar(
+                    "SELECT EXISTS(SELECT 1 FROM cards WHERE instr(lower(ifnull(images,'') || body),?)>0 UNION ALL SELECT 1 FROM ops WHERE instr(lower(ifnull(before,'')),?)>0)",
+                    name.ToLowerInvariant(), name.ToLowerInvariant())) != 0,
+                    ct, TimeSpan.FromMilliseconds(Math.Min(75, 2000 - clock.Elapsed.TotalMilliseconds)));
+            }
+            catch (TimeoutException) { break; } // yield to writers; retry garbage collection another day
+            ct.ThrowIfCancellationRequested();
+            if (!used) try { File.Delete(f); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
     }
 
     /// <summary>Once a day: a consistent copy of the database into backup\ (7 kept).</summary>
-    public void Backup()
+    public void Backup(CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        using var maintenance = HomeLease.TryEnter(Home, "Backup");
+        if (maintenance == null) return;
         var today = DateTime.Now.ToString("yyyyMMdd");
         if (ReadOnly || Setting("backup.last") == today) return;
         var dir = Path.Combine(Home, "backup");
         Directory.CreateDirectory(dir);
+        foreach (var stale in Directory.EnumerateFiles(dir, "pincc-*.tmp"))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (BackupTempRx().IsMatch(Path.GetFileName(stale)))
+                try { File.Delete(stale); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
         var file = Path.Combine(dir, $"pincc-{today}.db");
-        if (File.Exists(file)) File.Delete(file);
-        Db.Script($"VACUUM INTO '{file.Replace("'", "''")}'");
+        var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            Db.Script($"VACUUM INTO '{temporary.Replace("'", "''")}'", ct, TimeSpan.FromSeconds(30));
+            ct.ThrowIfCancellationRequested();
+            File.Move(temporary, file, overwrite: true); // failure never removes the previous consistent copy
+        }
+        finally { try { File.Delete(temporary); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
         foreach (var old in Directory.GetFiles(dir, "pincc-*.db").OrderByDescending(f => f).Skip(7))
             try { File.Delete(old); } catch { }
         SetSetting("backup.last", today);
@@ -338,9 +437,11 @@ public sealed partial class Store : IDisposable
     /// <summary>Stores image bytes content-addressed under img/ and returns the reference "img/&lt;hash&gt;.ext".</summary>
     public string SaveImage(byte[] bytes, string ext = ".png")
     {
+        using var images = HomeLease.EnterImages(Home);
         var name = Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(bytes)).ToLowerInvariant()[..20] + ext;
         var path = Path.Combine(ImgDir, name);
         if (!File.Exists(path)) File.WriteAllBytes(path, bytes);
+        else File.SetLastWriteTimeUtc(path, DateTime.UtcNow); // protect the interval before the reference commits
         return "img/" + name;
     }
 
@@ -367,8 +468,8 @@ public sealed partial class Store : IDisposable
 
     static string Marks(int n) => string.Join(",", Enumerable.Repeat("?", n));
 
-    [GeneratedRegex(@"img/([0-9a-f]{20}\.\w+)")]
-    private static partial Regex ImgRefRx();
+    [GeneratedRegex(@"^pincc-\d{8}\.db\.[0-9a-f]{32}\.tmp$", RegexOptions.IgnoreCase)]
+    private static partial Regex BackupTempRx();
 }
 
 /// <summary>The card changed since the caller read it (CLI --if-rev).</summary>

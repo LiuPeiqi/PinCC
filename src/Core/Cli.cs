@@ -29,7 +29,7 @@ public static class Cli
         ["run"] = ["json"],
     };
 
-    public static int Run(string[] args, TextWriter o, Func<string> readStdin)
+    public static int Run(string[] args, TextWriter o, Func<string> readStdin, CancellationToken ct = default)
     {
         var verb = args.Length > 0 ? args[0].ToLowerInvariant() : "help";
         try
@@ -147,38 +147,54 @@ public static class Cli
                     var skill = Skills.Find(pos[0]) ?? throw new KeyNotFoundException($"找不到技能「{pos[0]}」（PinCC skills 列出全部）");
                     var card = skill.Scope == "card" ? Need(s, pos.Skip(1).ToList()) : null;
                     var llm = Llm.FromSettings(s, skill.Runner) ?? throw new InvalidOperationException("没有可用的执行器：" + Llm.Problem(s, skill.Runner));
+                    using var run = RunContext.Start(s, skill, llm, ct, card?.Id);
                     var g = Begin(s);
-                    if (skill.Grants.Contains("pincc")) s.Reserve(g);
-                    SkillResult res;
                     try
                     {
-                        res = SkillRun.Run(new SkillRequest
+                        run.ThrowIfStopped();
+                        if (skill.Grants.Contains("pincc")) s.Reserve(g);
+                        var res = SkillRun.Run(new SkillRequest
                         {
                             Skill = skill, Llm = llm, Store = s, Card = card, Desk = skill.Scope == "desk" ? DeskMarkdown(s, s.Active()) : null,
                             Template = skill.Name == "summary" && skill.Builtin ? s.Setting("llm.prompt") : null, Group = skill.Grants.Contains("pincc") ? g.Number : null,
-                        }).GetAwaiter().GetResult()!;
+                            Context = run,
+                        }, run.Token).GetAwaiter().GetResult();
+                        if (res == null)
+                        {
+                            run.Complete("skipped");
+                            o.WriteLine("（本次任务无需运行）");
+                            return Ok;
+                        }
+                        run.ThrowIfStopped();
+                        var (_, ok) = SkillRun.Apply(s, g, skill, res, card?.Id, context: run);
+                        run.Complete(ok || skill.Output == "none" ? "success" : "stale");
+                        if (json) { o.WriteLine(Json(new { skill = skill.Name, card = card?.Id, output = skill.Output, written = ok, grp = g.Empty ? (long?)null : g.Number, result = res.Text })); return Ok; }
+                        o.WriteLine(res.Text);
+                        o.WriteLine();
+                        o.WriteLine(skill.Output switch
+                        {
+                            "summary" or "append" when !ok => "（卡片在运行期间改动了，结果未写入）",
+                            "summary" => $"已写入 #{card!.Id} 的摘要（撤销：PinCC restore {g.Number}）",
+                            "append" => $"已追加到 #{card!.Id}（撤销：PinCC restore {g.Number}）",
+                            "cards" when ok => $"已新建卡片（撤销：PinCC restore {g.Number}）",
+                            _ => g.Empty ? "（没有写入）" : $"本次运行的写入可一起撤销：PinCC restore {g.Number}",
+                        });
+                        return Ok;
                     }
-                    catch (Exception e) when (e is InvalidOperationException or TimeoutException or IOException)
+                    catch (Exception e) when (e is InvalidOperationException or TimeoutException or IOException or OperationCanceledException)
                     {
-                        s.Release(g);
-                        o.WriteLine($"错误：技能 {skill.Name} 失败：" + e.Message); // the run failed, the command was fine: no usage hint
+                        var cancelled = ct.IsCancellationRequested;
+                        run.Complete(cancelled ? "cancelled" : e is TimeoutException || run.Token.IsCancellationRequested ? "timeout" : "error", e.Message);
+                        o.WriteLine($"错误：技能 {skill.Name} " + (cancelled ? "已取消" : "失败：" + e.Message));
                         return UsageError;
                     }
-                    var (_, ok) = SkillRun.Apply(s, g, skill, res, card?.Id);
-                    s.Release(g);
-                    if (json) { o.WriteLine(Json(new { skill = skill.Name, card = card?.Id, output = skill.Output, written = ok, grp = g.Empty ? (long?)null : g.Number, result = res.Text })); return Ok; }
-                    o.WriteLine(res.Text);
-                    o.WriteLine();
-                    o.WriteLine(skill.Output switch
+                    finally
                     {
-                        "summary" or "append" when !ok => "（卡片在运行期间改动了，结果未写入）",
-                        "summary" => $"已写入 #{card!.Id} 的摘要（撤销：PinCC restore {g.Number}）",
-                        "append" => $"已追加到 #{card!.Id}（撤销：PinCC restore {g.Number}）",
-                        "cards" when ok => $"已新建卡片（撤销：PinCC restore {g.Number}）",
-                        _ => g.Empty ? "（没有写入）" : $"本次运行的写入可一起撤销：PinCC restore {g.Number}",
-                    });
-                    return Ok;
+                        try { s.Release(g); }
+                        catch (Exception e) { Diagnostics.Write(s.Home, new { run_id = run.Id, phase = "release", error = e.Message }); }
+                    }
                 }
+
                 default: // restore
                 {
                     if (pos.Count == 0 || !long.TryParse(pos[0], out var grp)) return Fail(o, UsageError, "restore 需要操作组编号（见 PinCC log 第一列）");
@@ -194,6 +210,7 @@ public static class Cli
         catch (InputChangedException e) { return Fail(o, Conflict, e.Message + "，未写入。"); }
         catch (KeyNotFoundException e) { return Fail(o, NotFound, e.Message.Length > 0 && !e.Message.StartsWith("The given key") ? e.Message : "找不到这张卡片"); }
         catch (Exception e) when (e is ArgumentException or FormatException or OverflowException) { return Fail(o, UsageError, e.Message); }
+        catch (MaintenanceBusyException e) { return Fail(o, Busy, e.Message); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException) { return Fail(o, UsageError, e.Message); }
         catch (InvalidOperationException e) when (e.Message.Contains("(5)") || e.Message.Contains("(6)")) { return Fail(o, Busy, "数据库正忙，请稍后重试"); }
         catch (InvalidOperationException e) { return Fail(o, UsageError, e.Message); }
