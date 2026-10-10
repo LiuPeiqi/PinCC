@@ -13,3 +13,13 @@ docs/diagnostics/
 
 # Publish promotion scratch inside dist/
 dist/**/PinCC.next-*.exe
+# Local macOS/Xcode products and per-machine settings
+mac/.build/
+mac/build/
+artifacts/macos/
+mac/Config/Local.xcconfig
+**/xcuserdata/
+*.xcuserstate
+.DS_Store
+# Generated macOS distribution artifacts
+dist/mac/

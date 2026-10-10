@@ -1,0 +1,311 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 77;
+    objects = {
+
+/* Begin PBXBuildFile section */
+        000000000000000000000101 /* PinCCCore in Frameworks */ = {isa = PBXBuildFile; productRef = 000000000000000000000201; };
+        000000000000000000000102 /* PinCCDesk in Frameworks */ = {isa = PBXBuildFile; productRef = 000000000000000000000202; };
+        000000000000000000000103 /* PinCCMacPlatform in Frameworks */ = {isa = PBXBuildFile; productRef = 000000000000000000000203; };
+        000000000000000000000104 /* PinCCCli in Frameworks */ = {isa = PBXBuildFile; productRef = 000000000000000000000204; };
+        000000000000000000000105 /* PinCCCli in Frameworks */ = {isa = PBXBuildFile; productRef = 000000000000000000000205; };
+        000000000000000000000106 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000306; };
+        000000000000000000000107 /* builtin in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000307; };
+        000000000000000000000108 /* pincc in Embed CLI */ = {isa = PBXBuildFile; fileRef = 000000000000000000000302; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+        000000000000000000000401 = {
+            isa = PBXContainerItemProxy;
+            containerPortal = 000000000000000000000001 /* Project object */;
+            proxyType = 1;
+            remoteGlobalIDString = 000000000000000000000502;
+            remoteInfo = pincc;
+        };
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+        000000000000000000000601 /* Embed CLI */ = {
+            isa = PBXCopyFilesBuildPhase;
+            buildActionMask = 2147483647;
+            dstPath = Contents/Helpers;
+            dstSubfolderSpec = 1;
+            files = (000000000000000000000108 /* pincc in Embed CLI */, );
+            name = "Embed CLI";
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+        000000000000000000000301 /* PinCC.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PinCC.app; sourceTree = BUILT_PRODUCTS_DIR; };
+        000000000000000000000302 /* pincc */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = pincc; sourceTree = BUILT_PRODUCTS_DIR; };
+        000000000000000000000303 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
+        000000000000000000000304 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
+        000000000000000000000305 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
+        000000000000000000000306 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+        000000000000000000000307 /* builtin */ = {isa = PBXFileReference; lastKnownFileType = folder; name = builtin; path = ../../builtin; sourceTree = "<group>"; };
+        000000000000000000000308 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+        000000000000000000000309 /* PinCC.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PinCC.entitlements; sourceTree = "<group>"; };
+        000000000000000000000310 /* Package.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Package.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+        000000000000000000000701 /* PinCCApp */ = {
+            isa = PBXFileSystemSynchronizedRootGroup;
+            path = Sources/PinCCApp;
+            sourceTree = "<group>";
+        };
+        000000000000000000000702 /* pincc */ = {
+            isa = PBXFileSystemSynchronizedRootGroup;
+            path = Sources/pincc;
+            sourceTree = "<group>";
+        };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+        000000000000000000000602 /* Frameworks */ = {
+            isa = PBXFrameworksBuildPhase;
+            buildActionMask = 2147483647;
+            files = (
+                000000000000000000000101 /* PinCCCore in Frameworks */,
+                000000000000000000000102 /* PinCCDesk in Frameworks */,
+                000000000000000000000103 /* PinCCMacPlatform in Frameworks */,
+                000000000000000000000104 /* PinCCCli in Frameworks */,
+            );
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+        000000000000000000000603 /* Frameworks */ = {
+            isa = PBXFrameworksBuildPhase;
+            buildActionMask = 2147483647;
+            files = (000000000000000000000105 /* PinCCCli in Frameworks */, );
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+        000000000000000000000703 = {
+            isa = PBXGroup;
+            children = (
+                000000000000000000000701 /* PinCCApp */,
+                000000000000000000000702 /* pincc */,
+                000000000000000000000310 /* Package.swift */,
+                000000000000000000000704 /* Resources */,
+                000000000000000000000705 /* Config */,
+                000000000000000000000706 /* Products */,
+            );
+            sourceTree = "<group>";
+        };
+        000000000000000000000704 /* Resources */ = {
+            isa = PBXGroup;
+            children = (
+                000000000000000000000306 /* Assets.xcassets */,
+                000000000000000000000307 /* builtin */,
+                000000000000000000000308 /* Info.plist */,
+                000000000000000000000309 /* PinCC.entitlements */,
+            );
+            path = Resources;
+            sourceTree = "<group>";
+        };
+        000000000000000000000705 /* Config */ = {
+            isa = PBXGroup;
+            children = (
+                000000000000000000000303 /* Base.xcconfig */,
+                000000000000000000000304 /* Debug.xcconfig */,
+                000000000000000000000305 /* Release.xcconfig */,
+            );
+            path = Config;
+            sourceTree = "<group>";
+        };
+        000000000000000000000706 /* Products */ = {
+            isa = PBXGroup;
+            children = (000000000000000000000301 /* PinCC.app */, 000000000000000000000302 /* pincc */, );
+            name = Products;
+            sourceTree = "<group>";
+        };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+        000000000000000000000501 /* PinCCApp */ = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = 000000000000000000000801;
+            buildPhases = (
+                000000000000000000000604 /* Sources */,
+                000000000000000000000602 /* Frameworks */,
+                000000000000000000000606 /* Resources */,
+                000000000000000000000601 /* Embed CLI */,
+            );
+            buildRules = ();
+            dependencies = (000000000000000000000402, );
+            fileSystemSynchronizedGroups = (000000000000000000000701 /* PinCCApp */, );
+            name = PinCCApp;
+            packageProductDependencies = (
+                000000000000000000000201 /* PinCCCore */,
+                000000000000000000000202 /* PinCCDesk */,
+                000000000000000000000203 /* PinCCMacPlatform */,
+                000000000000000000000204 /* PinCCCli */,
+            );
+            productName = PinCC;
+            productReference = 000000000000000000000301 /* PinCC.app */;
+            productType = "com.apple.product-type.application";
+        };
+        000000000000000000000502 /* pincc */ = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = 000000000000000000000802;
+            buildPhases = (000000000000000000000605 /* Sources */, 000000000000000000000603 /* Frameworks */, );
+            buildRules = ();
+            dependencies = ();
+            fileSystemSynchronizedGroups = (000000000000000000000702 /* pincc */, );
+            name = pincc;
+            packageProductDependencies = (000000000000000000000205 /* PinCCCli */, );
+            productName = pincc;
+            productReference = 000000000000000000000302 /* pincc */;
+            productType = "com.apple.product-type.tool";
+        };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+        000000000000000000000001 /* Project object */ = {
+            isa = PBXProject;
+            attributes = {
+                BuildIndependentTargetsInParallel = YES;
+                LastUpgradeCheck = 2600;
+                TargetAttributes = {
+                    000000000000000000000501 = {CreatedOnToolsVersion = 16.0; ProvisioningStyle = Manual; };
+                    000000000000000000000502 = {CreatedOnToolsVersion = 16.0; ProvisioningStyle = Manual; };
+                };
+            };
+            buildConfigurationList = 000000000000000000000803;
+            developmentRegion = en;
+            hasScannedForEncodings = 0;
+            knownRegions = (en, Base, );
+            mainGroup = 000000000000000000000703;
+            minimizedProjectReferenceProxies = 1;
+            packageReferences = (000000000000000000000901, );
+            preferredProjectObjectVersion = 77;
+            productRefGroup = 000000000000000000000706 /* Products */;
+            projectDirPath = "";
+            projectRoot = "";
+            targets = (000000000000000000000501 /* PinCCApp */, 000000000000000000000502 /* pincc */, );
+        };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+        000000000000000000000606 /* Resources */ = {
+            isa = PBXResourcesBuildPhase;
+            buildActionMask = 2147483647;
+            files = (
+                000000000000000000000106 /* Assets.xcassets in Resources */,
+                000000000000000000000107 /* builtin in Resources */,
+            );
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+        000000000000000000000604 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+        000000000000000000000605 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+        000000000000000000000402 = {
+            isa = PBXTargetDependency;
+            target = 000000000000000000000502 /* pincc */;
+            targetProxy = 000000000000000000000401;
+        };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+        000000000000000000000811 /* Debug */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+                CODE_SIGN_ENTITLEMENTS = Resources/PinCC.entitlements;
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = Resources/Info.plist;
+                LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+                PRODUCT_BUNDLE_IDENTIFIER = io.pincc.PinCC.dev;
+                PRODUCT_NAME = PinCC;
+                SKIP_INSTALL = NO;
+            };
+            name = Debug;
+        };
+        000000000000000000000812 /* Release */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+                CODE_SIGN_ENTITLEMENTS = Resources/PinCC.entitlements;
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = Resources/Info.plist;
+                LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+                PRODUCT_BUNDLE_IDENTIFIER = io.pincc.PinCC;
+                PRODUCT_NAME = PinCC;
+                SKIP_INSTALL = NO;
+            };
+            name = Release;
+        };
+        000000000000000000000813 /* Debug */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CODE_SIGN_ENTITLEMENTS = Resources/PinCC.entitlements;
+                GENERATE_INFOPLIST_FILE = NO;
+                LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+                PRODUCT_BUNDLE_IDENTIFIER = io.pincc.PinCC.dev.cli;
+                PRODUCT_NAME = pincc;
+                SKIP_INSTALL = YES;
+                OTHER_CODE_SIGN_FLAGS = "$(inherited) --identifier $(PRODUCT_BUNDLE_IDENTIFIER)";
+                STRIP_INSTALLED_PRODUCT = NO;
+                DEPLOYMENT_POSTPROCESSING = NO;
+            };
+            name = Debug;
+        };
+        000000000000000000000814 /* Release */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CODE_SIGN_ENTITLEMENTS = Resources/PinCC.entitlements;
+                GENERATE_INFOPLIST_FILE = NO;
+                LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+                PRODUCT_BUNDLE_IDENTIFIER = io.pincc.PinCC.cli;
+                PRODUCT_NAME = pincc;
+                SKIP_INSTALL = YES;
+                OTHER_CODE_SIGN_FLAGS = "$(inherited) --identifier $(PRODUCT_BUNDLE_IDENTIFIER)";
+                STRIP_INSTALLED_PRODUCT = NO;
+                DEPLOYMENT_POSTPROCESSING = NO;
+            };
+            name = Release;
+        };
+        000000000000000000000815 /* Debug */ = {
+            isa = XCBuildConfiguration;
+            baseConfigurationReference = 000000000000000000000304 /* Debug.xcconfig */;
+            buildSettings = {};
+            name = Debug;
+        };
+        000000000000000000000816 /* Release */ = {
+            isa = XCBuildConfiguration;
+            baseConfigurationReference = 000000000000000000000305 /* Release.xcconfig */;
+            buildSettings = {};
+            name = Release;
+        };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+        000000000000000000000801 = {isa = XCConfigurationList; buildConfigurations = (000000000000000000000811 /* Debug */, 000000000000000000000812 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+        000000000000000000000802 = {isa = XCConfigurationList; buildConfigurations = (000000000000000000000813 /* Debug */, 000000000000000000000814 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+        000000000000000000000803 = {isa = XCConfigurationList; buildConfigurations = (000000000000000000000815 /* Debug */, 000000000000000000000816 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+        000000000000000000000901 = {isa = XCLocalSwiftPackageReference; relativePath = "."; };
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+        000000000000000000000201 /* PinCCCore */ = {isa = XCSwiftPackageProductDependency; package = 000000000000000000000901; productName = PinCCCore; };
+        000000000000000000000202 /* PinCCDesk */ = {isa = XCSwiftPackageProductDependency; package = 000000000000000000000901; productName = PinCCDesk; };
+        000000000000000000000203 /* PinCCMacPlatform */ = {isa = XCSwiftPackageProductDependency; package = 000000000000000000000901; productName = PinCCMacPlatform; };
+        000000000000000000000204 /* PinCCCli */ = {isa = XCSwiftPackageProductDependency; package = 000000000000000000000901; productName = PinCCCli; };
+        000000000000000000000205 /* PinCCCli */ = {isa = XCSwiftPackageProductDependency; package = 000000000000000000000901; productName = PinCCCli; };
+/* End XCSwiftPackageProductDependency section */
+    };
+    rootObject = 000000000000000000000001 /* Project object */;
+}

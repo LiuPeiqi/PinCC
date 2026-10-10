@@ -1,5 +1,7 @@
 # Pin Carbon Copy（PinCC）macOS 版制作计划（Swift 路线）
 
+> 实现状态（2026-10-10）：本地 Swift 源码、Xcode 工程、契约样例和发布脚本现已建立。构建入口见 [mac/README.md](../mac/README.md)，实际基线、验证证据及待执行的 Mac 实机验收见 [MACOS-IMPLEMENTATION.md](MACOS-IMPLEMENTATION.md)。下文保留当时设计与计划背景；工具链以当前工程和官方支持表为准。
+
 正式全称 **Pin Carbon Copy**；命令与产物仍用简写 **PinCC** / `pincc`（本计划中的路径、可执行文件名、互斥量名等均不因全称而改）。
 
 本文是 macOS 版的完整制作计划，取代上一版基于 .NET（net10.0-macos）的路线（上一版保存在 git 提交 7e24435）。内容包括：技术路线、架构、两端数据怎样通用、两端逻辑怎样由机器保证一致、每个模块在 Mac 上的做法、分阶段安排、风险和待决定事项。

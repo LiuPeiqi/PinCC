@@ -1,3 +1,18 @@
 # Final distribution binaries (GitHub LFS; free tier allows ~2 GiB storage)
 dist/**/*.exe filter=lfs diff=lfs merge=lfs -text
 *.zip filter=lfs diff=lfs merge=lfs -text
+# Native macOS source and portable scripts retain LF on Windows checkouts
+*.swift text eol=lf
+*.sh text eol=lf
+mac/**/*.py text eol=lf
+mac/**/*.ps1 text eol=lf
+mac/**/*.json text eol=lf
+mac/**/*.jsonl text eol=lf
+mac/**/*.xcconfig text eol=lf
+mac/**/*.plist text eol=lf
+mac/**/*.entitlements text eol=lf
+mac/**/*.pbxproj text eol=lf
+mac/**/*.xcscheme text eol=lf
+mac/**/*.h text eol=lf
+mac/**/module.modulemap text eol=lf
+mac/**/*.txt text eol=lf

@@ -10,6 +10,10 @@
 
 ---
 
+## macOS 本地工程
+
+Mac 版采用 Swift 6、AppKit 和系统 SQLite，每张卡片仍是独立悬浮窗口。完整源码与 Xcode 工程位于 [mac/](mac/README.md)，使用 Xcode 16 或更新版本，部署目标 macOS 13。开发、双架构检查、helper 和本地/正式发布入口见 [Mac 工程说明](mac/README.md)；实现依据与实机验收见 [实现记录](docs/MACOS-IMPLEMENTATION.md)。
+
 ## 快速上手
 
 | 你想… | 这样做 |

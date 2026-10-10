@@ -1,5 +1,7 @@
 # PinCC macOS 设计与本地开发交接
 
+> 实现状态（2026-10-10）：本地 Swift 源码、Xcode 工程、契约样例和发布脚本现已建立。构建入口见 [mac/README.md](../mac/README.md)，实际基线、验证证据及待执行的 Mac 实机验收见 [MACOS-IMPLEMENTATION.md](MACOS-IMPLEMENTATION.md)。下文保留当时设计与计划背景；工具链以当前工程和官方支持表为准。
+
 更新日期：2026 年 10 月 9 日。Pin Carbon Copy 的 macOS 版沿用 Swift 与 AppKit 路线，保留独立桌面卡片、快速采集、平铺避让、操作组撤销和本地 CLI，把窗口、输入、系统入口和权限反馈按 macOS 习惯实现。本稿补充现有 [macOS 制作计划](MACOS.md)，提供当前产品分析、界面规范、近期稳定性契约和 Mac 本地开发顺序。
 
 “本地化编写与构建”按在 Mac 本机开发理解。界面先沿用简体中文，多语言为后续扩展。本文中的 mac 界面、模块名和构建脚本是实施设计，尚未成为可运行的 Swift 工程。
