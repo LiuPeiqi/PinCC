@@ -243,7 +243,10 @@ src/Core/               纯逻辑：Db（winsqlite3）、Store（修改与操作
 builtin/                随程序发布的执行器（agents/*.json）和技能（skills/*/SKILL.md），与 Mac 版共用
 src/UI/                 WPF：Desk（唯一的修改入口与布局）、CardWindow、HubWindow（+ 按钮）、ManageWindow、
                         Flyout（提醒/颜色）、Layout（纯函数）、Native（Win32）、Hotkeys、MarkdownView、Theme.xaml
+mac/                    macOS Swift/AppKit 工程（见 mac/README.md）
+oracle/mac-contracts/   Windows 上再生 Mac 契约样例的 C# 生成器
 tests/                  无需测试框架的自测（When、Markdown、Card、Layout、Store、Fetch、技能）
 docs/DESIGN.md          设计说明与取舍记录
+docs/MACOS-IMPLEMENTATION.md  macOS 实现记录与实机验收
 docs/examples/skills/   技能示例（飞书文档）
 ```

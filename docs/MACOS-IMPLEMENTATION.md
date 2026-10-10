@@ -1,6 +1,6 @@
 # macOS 实现记录与本机验收
 
-更新：2026-10-10。当前实现位于 `mac/`，以 `docs/MACOS-DESIGN-HANDOFF.md` 的独立悬浮卡片方案和当前 C# 源码为依据。规范基线提交为 `1bf37c6260626e354122b87414f6cce7f014ead7`，具体文件内容由 `mac/contracts/source-fingerprint.json` 固定。旧设计文档中“工程尚不存在”的描述是当时状态，构建入口以 [mac/README.md](../mac/README.md) 为准。
+更新：2026-10-10。当前实现位于 `mac/`，以独立悬浮卡片方案和当前 C# 源码为依据。规范基线提交为 `1bf37c6260626e354122b87414f6cce7f014ead7`，具体文件内容由 `mac/contracts/source-fingerprint.json` 固定。构建入口以 [mac/README.md](../mac/README.md) 为准。
 
 ## 工程选择
 
